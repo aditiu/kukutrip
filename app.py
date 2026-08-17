@@ -1573,6 +1573,7 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                 base_inr = base_value
 
         display_mode = None
+        agent_markup_raw = None
         markup_raw = None
         if base_inr is not None:
             st.markdown("**Step 2 — Price Display in PDF**")
@@ -1583,7 +1584,30 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                 horizontal=True,
             )
 
-            st.markdown("**Step 3 — Markup**")
+            st.markdown("**Step 3 — Agent Markup (internal, percentage only)**")
+            agent_markup_raw = st.text_input(
+                "What is your agent markup percentage? (internal use only — "
+                "never shown to the customer or in the PDF)",
+                key="price_agent_markup_input",
+                placeholder="e.g. 10%",
+            )
+
+        # ── Compute base + agent markup (internal only) ─────────────────────
+        base_after_agent_markup = None
+        agent_markup_val = None
+        if base_inr is not None and agent_markup_raw:
+            m = re.search(r'[\d.]+', agent_markup_raw)
+            agent_pct = float(m.group()) if m else 0.0
+            agent_markup_val = base_inr * (agent_pct / 100.0)
+            base_after_agent_markup = base_inr + agent_markup_val
+            st.caption(
+                f"🧮 Internal calculation (not shown to customer): "
+                f"Base ₹{_format_inr(base_inr)} + Agent Markup {agent_pct}% "
+                f"(₹{_format_inr(agent_markup_val)}) = ₹{_format_inr(base_after_agent_markup)}"
+            )
+
+        if base_after_agent_markup is not None:
+            st.markdown("**Step 4 — Markup**")
             markup_raw = st.text_input(
                 "What markup would you like to add to the base package price? "
                 "(percentage e.g. 15% or fixed amount e.g. 20000)",
@@ -1596,9 +1620,9 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
         final_value_str = None
         ready_to_generate = False
 
-        if base_inr is not None and display_mode and markup_raw:
-            markup_val = _parse_markup(markup_raw, base_inr)
-            total_final = base_inr + markup_val
+        if base_after_agent_markup is not None and display_mode and markup_raw:
+            markup_val = _parse_markup(markup_raw, base_after_agent_markup)
+            total_final = base_after_agent_markup + markup_val
             if display_mode == "Price Per Person":
                 per_person = total_final / max(1, persons_count)
                 final_label = "Price Per Person"
