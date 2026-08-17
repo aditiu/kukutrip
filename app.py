@@ -921,7 +921,25 @@ def load_pdf_text(path: Path) -> str:
 def load_docx_text(path: Path) -> str:
     from docx import Document
     doc = Document(path)
-    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    parts = []
+    # Paragraphs
+    for p in doc.paragraphs:
+        if p.text.strip():
+            parts.append(p.text.strip())
+    # Tables — critical for hotel/price data stored in table cells
+    for table in doc.tables:
+        headers = [c.text.strip() for c in table.rows[0].cells] if table.rows else []
+        for row in table.rows[1:]:
+            cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+            if any(cells):
+                if headers:
+                    row_text = " | ".join(
+                        f"{h}: {v}" for h, v in zip(headers, cells) if v
+                    )
+                else:
+                    row_text = " | ".join(c for c in cells if c)
+                parts.append(row_text)
+    return "\n".join(parts)
 
 
 # ── Vector store ──────────────────────────────────────────────────────────────
