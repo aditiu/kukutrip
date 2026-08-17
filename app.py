@@ -186,6 +186,19 @@ def fetch_destination_image(keyword: str) -> Path | None:
         img_url = _wikimedia_search_image(keyword, proxies, headers_h)
 
     if not img_url:
+        # Last fallback: Unsplash source (no API key needed)
+        try:
+            unsplash_url = f"https://source.unsplash.com/1600x900/?{keyword.replace(' ', ',')},landscape,travel"
+            img_r = requests.get(unsplash_url, proxies=proxies, timeout=20,
+                                 headers=headers_h, allow_redirects=True)
+            if img_r.status_code == 200 and len(img_r.content) > 15000:
+                from PIL import Image as PILImage
+                from io import BytesIO as BytesIO2
+                pil = PILImage.open(BytesIO2(img_r.content)).convert("RGB")
+                pil.save(str(cached), "JPEG", quality=92, optimize=True)
+                return cached
+        except Exception:
+            pass
         return None
 
     # Download and convert to landscape JPEG
@@ -198,9 +211,8 @@ def fetch_destination_image(keyword: str) -> Path | None:
             # Crop to 16:9 if portrait
             w, h = pil.size
             if h > w:
-                # Rotate landscape or crop top portion
                 new_h = int(w * 9 / 16)
-                top = max(0, (h - new_h) // 4)   # favour top third
+                top = max(0, (h - new_h) // 4)
                 pil = pil.crop((0, top, w, top + new_h))
             pil.save(str(cached), "JPEG", quality=92, optimize=True)
             return cached
