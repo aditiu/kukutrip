@@ -8,5 +8,3 @@ template/itinerary_*.pdf
 template/italy_v*.pdf
 template/georgia_v*.pdf
 *.zip
-.streamlit/secrets.toml
-.streamlit/secrets.toml
