@@ -1275,14 +1275,18 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
         st.success(f"✅ **Itinerary Ready** — {pkg_label}")
         st.caption("All required information has been confirmed. Click below to generate your PDF.")
 
+        # Show persistent image fetch debug info (survives rerun)
+        if st.session_state.get("_img_dbg_msgs"):
+            for _m in st.session_state["_img_dbg_msgs"]:
+                st.caption(f"🖼️ {_m}")
+
         if st.button("📄 Generate PDF", type="primary", use_container_width=True):
             with st.spinner("Generating PDF — fetching destination image…"):
                 try:
                     img_kw  = meta_stored.get("image_keyword") or meta_stored.get("destination") or "travel landscape"
                     _img_dbg: list = []
                     hdr_img = fetch_destination_image(img_kw, _dbg=_img_dbg)
-                    for _msg in _img_dbg:
-                        st.caption(f"🖼️ {_msg}")
+                    st.session_state["_img_dbg_msgs"] = _img_dbg  # persist across rerun
                     pdf_b = generate_pdf(pkg_label, "", meta_stored, header_img_path=hdr_img)
                     pdf_n = f"itinerary_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
                     # Save PDF to template dir
