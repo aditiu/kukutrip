@@ -1045,27 +1045,87 @@ def load_pdf_text(path: Path) -> str:
     return "\n".join(parts)
 
 def load_docx_text(path: Path) -> str:
+    """
+    Extract text from a DOCX in TRUE READING ORDER, interleaving paragraphs
+    and tables exactly as they appear in the document body.
+
+    This is critical for multi-package documents (e.g. several Georgia
+    itinerary variants in one file) where each package has its own pricing
+    table immediately following its package-name heading. Processing all
+    paragraphs first and all tables afterward (the previous approach)
+    completely disconnects each price table from its package heading,
+    causing the LLM/retrieval to pull the wrong package's rate table.
+
+    Each table row is also prefixed with the most recent package/section
+    heading seen so far, so retrieved chunks always carry enough context
+    to identify which package the rates/hotels belong to — even if the
+    heading itself ends up in a different chunk after text splitting.
+    """
     from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+
     doc = Document(path)
+    body = doc.element.body
+
     parts = []
-    # Paragraphs
-    for p in doc.paragraphs:
-        if p.text.strip():
-            parts.append(p.text.strip())
-    # Tables — critical for hotel/price data stored in table cells
-    for table in doc.tables:
-        headers = [c.text.strip() for c in table.rows[0].cells] if table.rows else []
-        for row in table.rows[1:]:
-            cells = [c.text.strip().replace("\n", " ") for c in row.cells]
-            if any(cells):
+    current_heading = ""
+    # Headings are short, non-tabular lines that look like a package/section
+    # title — e.g. "6 Nights - 4 Nights Tbilisi + 2 Nights Batumi".
+    # IMPORTANT: generic lines like "Duration: 7 Days and 6 Nights" or
+    # "Validity: April 1 to October 31, 2026" also mention Nights/Days but
+    # are NOT unique package identifiers — they repeat verbatim across
+    # multiple different packages in this document. If these overwrite
+    # current_heading, every subsequent price table gets tagged with the
+    # wrong (non-unique) package label, causing rate mix-ups between
+    # packages. Only the actual package-title line (which names the
+    # cities/route, not just a generic duration/validity statement) should
+    # update current_heading.
+    heading_re = re.compile(r'\bNights?\b|\bDays?\b', re.I)
+    day_re = re.compile(r'^\s*Day\s*\d+\s*:', re.I)
+    non_title_re = re.compile(
+        r'^\s*(Duration|Validity|Cities|Rates|Accommodation|Supplement|'
+        r'No\.?\s*of\s*Pax|Destination)\s*[:\-]', re.I
+    )
+
+    for child in body.iterchildren():
+        if child.tag == qn('w:p'):
+            p = Paragraph(child, doc)
+            text = p.text.strip()
+            if not text:
+                continue
+            parts.append(text)
+            # Update current package heading — prefer lines like
+            # "6 Nights - 4 Nights Tbilisi + 2 Nights Batumi" over
+            # per-day headings like "Day 1: Arrival" or generic
+            # "Duration: ..." / "Validity: ..." lines that repeat
+            # identically across many different packages.
+            if (heading_re.search(text) and not day_re.match(text)
+                    and not non_title_re.match(text) and len(text) < 120):
+                current_heading = text
+
+        elif child.tag == qn('w:tbl'):
+            table = Table(child, doc)
+            if not table.rows:
+                continue
+            headers = [c.text.strip() for c in table.rows[0].cells]
+            for row in table.rows[1:]:
+                cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+                if not any(cells):
+                    continue
                 if headers:
                     row_text = " | ".join(
                         f"{h}: {v}" for h, v in zip(headers, cells) if v
                     )
                 else:
                     row_text = " | ".join(c for c in cells if c)
+                if current_heading:
+                    row_text = f"[Package: {current_heading}] {row_text}"
                 parts.append(row_text)
+
     return "\n".join(parts)
+
 
 
 # ── Vector store ──────────────────────────────────────────────────────────────
