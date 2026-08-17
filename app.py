@@ -1529,9 +1529,15 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
             for _m in st.session_state["_img_dbg_msgs"]:
                 st.caption(f"🖼️ {_m}")
 
+        # Show the original base price (as found in the KB) for the agent's
+        # reference only — this is NEVER shown in the customer-facing PDF.
+        if raw_amount:
+            st.caption(f"💰 Base price from knowledge base (internal use only): **{raw_amount}**")
+
         if base_value is None:
             st.warning(
                 "⚠️ No base package price was found in the knowledge base for this itinerary. "
+
                 "Please provide a base price manually to continue."
             )
             manual_amount = st.text_input(
