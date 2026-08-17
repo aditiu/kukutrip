@@ -1572,27 +1572,17 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
             else:
                 base_inr = base_value
 
-        display_mode = None
         agent_markup_raw = None
-        markup_raw = None
         if base_inr is not None:
-            st.markdown("**Step 2 — Price Display in PDF**")
-            display_mode = st.radio(
-                "How would you like the price to be shown in the PDF?",
-                ["Price Per Person", "Total Package Price"],
-                key="price_display_mode_input",
-                horizontal=True,
-            )
-
-            st.markdown("**Step 3 — Agent Markup (internal, percentage only)**")
+            st.markdown("**Step 2 — Agent Markup (internal, percentage only)**")
             agent_markup_raw = st.text_input(
-                "What is your agent markup percentage? (internal use only — "
-                "never shown to the customer or in the PDF)",
+                "What is your agent markup percentage, applied on the converted total? "
+                "(internal use only — never shown to the customer or in the PDF)",
                 key="price_agent_markup_input",
                 placeholder="e.g. 10%",
             )
 
-        # ── Compute base + agent markup (internal only) ─────────────────────
+        # ── Compute base (after conversion) + agent markup (internal only) ──
         base_after_agent_markup = None
         agent_markup_val = None
         if base_inr is not None and agent_markup_raw:
@@ -1606,13 +1596,30 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                 f"(₹{_format_inr(agent_markup_val)}) = ₹{_format_inr(base_after_agent_markup)}"
             )
 
+        markup_raw = None
         if base_after_agent_markup is not None:
-            st.markdown("**Step 4 — Markup**")
+            st.markdown("**Step 3 — Markup**")
             markup_raw = st.text_input(
-                "What markup would you like to add to the base package price? "
+                "What markup would you like to add to the package price? "
                 "(percentage e.g. 15% or fixed amount e.g. 20000)",
                 key="price_markup_input",
                 placeholder="e.g. 15% or 20000",
+            )
+
+        # ── Total after customer markup (internal, before display split) ────
+        total_final = None
+        if base_after_agent_markup is not None and markup_raw:
+            markup_val = _parse_markup(markup_raw, base_after_agent_markup)
+            total_final = base_after_agent_markup + markup_val
+
+        display_mode = None
+        if total_final is not None:
+            st.markdown("**Step 4 — Price Display in PDF**")
+            display_mode = st.radio(
+                "How would you like the price to be shown in the PDF?",
+                ["Price Per Person", "Total Package Price"],
+                key="price_display_mode_input",
+                horizontal=True,
             )
 
         # ── Compute final customer-facing price ─────────────────────────────
@@ -1620,9 +1627,7 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
         final_value_str = None
         ready_to_generate = False
 
-        if base_after_agent_markup is not None and display_mode and markup_raw:
-            markup_val = _parse_markup(markup_raw, base_after_agent_markup)
-            total_final = base_after_agent_markup + markup_val
+        if total_final is not None and display_mode:
             if display_mode == "Price Per Person":
                 per_person = total_final / max(1, persons_count)
                 final_label = "Price Per Person"
