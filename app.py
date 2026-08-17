@@ -140,7 +140,7 @@ def _wikimedia_search_image(query: str, proxies: dict, headers: dict) -> str | N
     return None
 
 
-def fetch_destination_image(keyword: str) -> Path | None:
+def fetch_destination_image(keyword: str, _dbg: list | None = None) -> Path | None:
     """
     Dynamically fetch a scenic hero image for the destination.
 
@@ -150,6 +150,7 @@ def fetch_destination_image(keyword: str) -> Path | None:
     3. Geography_of_{Country} article
     4. Country Wikipedia article
     5. Wikimedia Commons search for the keyword
+    6. picsum.photos seeded fallback
     """
     import hashlib, requests
     slug = hashlib.md5(keyword.lower().encode()).hexdigest()[:12]
@@ -161,35 +162,45 @@ def fetch_destination_image(keyword: str) -> Path | None:
     proxies = {"https": _p, "http": _p} if _p else {}
     headers_h = {"User-Agent": "TravelItineraryAgent/1.0 (travel-pdf-generator; free use)"}
 
+    def _log(msg):
+        if _dbg is not None:
+            _dbg.append(msg)
+
     # Build search candidates — keyword may be "Dolomites Italy" or "Kyoto" or "Tbilisi"
     words = keyword.strip().split()
     primary = words[0].title()
     country = words[-1].title() if len(words) > 1 else primary
 
     candidates = [
-        keyword.replace(" ", "_").title(),          # "Dolomites_Italy" or "Kyoto"
-        primary,                                     # "Dolomites" or "Kyoto"
-        f"Tourism_in_{country}",                     # "Tourism_in_Italy"
-        f"Tourism_in_{primary}",                     # "Tourism_in_Dolomites"
-        f"Geography_of_{country}",                   # "Geography_of_Italy"
-        f"{country}",                                # "Italy"
+        keyword.replace(" ", "_").title(),
+        primary,
+        f"Tourism_in_{country}",
+        f"Tourism_in_{primary}",
+        f"Geography_of_{country}",
+        f"{country}",
     ]
 
     img_url = None
     for search in candidates:
         img_url = _wiki_image(search, proxies, headers_h)
         if img_url:
+            _log(f"✅ Wikipedia image found via '{search}'")
             break
+    if not img_url:
+        _log(f"⚠️ Wikipedia: no image found for any candidate")
 
-    # Last resort: Wikimedia Commons full-text search
+    # Wikimedia Commons full-text search
     if not img_url:
         img_url = _wikimedia_search_image(keyword, proxies, headers_h)
+        if img_url:
+            _log(f"✅ Wikimedia Commons image found")
+        else:
+            _log(f"⚠️ Wikimedia Commons: no image found")
 
     if not img_url:
         # Last fallback: picsum.photos — reliable, free, no API key, seeded by keyword
         try:
-            import hashlib as _hl
-            seed = int(_hl.md5(keyword.lower().encode()).hexdigest()[:8], 16) % 1000000
+            seed = int(hashlib.md5(keyword.lower().encode()).hexdigest()[:8], 16) % 1000000
             picsum_url = f"https://picsum.photos/seed/{seed}/1600/900"
             img_r = requests.get(picsum_url, proxies=proxies, timeout=20,
                                  headers=headers_h, allow_redirects=True)
@@ -198,9 +209,12 @@ def fetch_destination_image(keyword: str) -> Path | None:
                 from io import BytesIO as BytesIO2
                 pil = PILImage.open(BytesIO2(img_r.content)).convert("RGB")
                 pil.save(str(cached), "JPEG", quality=92, optimize=True)
+                _log(f"✅ picsum.photos fallback used")
                 return cached
-        except Exception:
-            pass
+            else:
+                _log(f"⚠️ picsum.photos: status={img_r.status_code}, size={len(img_r.content)}")
+        except Exception as e:
+            _log(f"❌ picsum.photos error: {e}")
         return None
 
     # Download and convert to landscape JPEG
@@ -217,9 +231,12 @@ def fetch_destination_image(keyword: str) -> Path | None:
                 top = max(0, (h - new_h) // 4)
                 pil = pil.crop((0, top, w, top + new_h))
             pil.save(str(cached), "JPEG", quality=92, optimize=True)
+            _log(f"✅ Image downloaded and saved ({w}x{h}px)")
             return cached
-    except Exception:
-        pass
+        else:
+            _log(f"⚠️ Image download: status={img_r.status_code}, size={len(img_r.content)}")
+    except Exception as e:
+        _log(f"❌ Image download error: {e}")
     return None
 
 def _h(text: str) -> str:
@@ -1262,8 +1279,10 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
             with st.spinner("Generating PDF — fetching destination image…"):
                 try:
                     img_kw  = meta_stored.get("image_keyword") or meta_stored.get("destination") or "travel landscape"
-                    hdr_img = fetch_destination_image(img_kw)
-                    # No fallback to template/header_bg.jpg — use gradient-only hero if no image found
+                    _img_dbg: list = []
+                    hdr_img = fetch_destination_image(img_kw, _dbg=_img_dbg)
+                    for _msg in _img_dbg:
+                        st.caption(f"🖼️ {_msg}")
                     pdf_b = generate_pdf(pkg_label, "", meta_stored, header_img_path=hdr_img)
                     pdf_n = f"itinerary_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
                     # Save PDF to template dir
