@@ -1711,26 +1711,38 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
 
         # ── Manual base price override — always available, with INR/USD toggle ──
         # Lets the agent overwrite the knowledge-base price (or supply one when
-        # none was found) in either currency. When INR is selected, no
-        # conversion rate step is needed downstream.
+        # none was found) in either currency. If left blank, the default base
+        # price picked from the knowledge base (shown above) is used as-is.
+        # When INR is chosen (default or override), the USD→INR conversion
+        # step is skipped entirely; when USD is chosen, conversion is required.
         with st.expander(
-            "✏️ Override base price" if base_value is not None else "✏️ Enter base price",
+            "✏️ Override base price (optional)" if base_value is not None else "✏️ Enter base price",
             expanded=(base_value is None),
         ):
+            if base_value is not None:
+                st.caption(
+                    "Leave the field below blank to keep using the default base price "
+                    f"from the knowledge base ({raw_amount})."
+                )
             override_currency = st.radio(
-                "Currency",
-                ["INR", "USD"],
+                "Currency of the price you're entering",
+                ["USD", "INR"],
+                index=0 if is_usd else 1,   # default to the currency already detected from the KB
                 key="price_override_currency_input",
                 horizontal=True,
             )
             manual_amount = st.text_input(
-                f"Base package price in {override_currency} (numbers only, no currency symbol)",
+                f"Base package price in {override_currency} (numbers only, no currency symbol) — "
+                "leave blank to use the default",
                 key="price_manual_base",
             )
             manual_val = _extract_amount_value(manual_amount)
             if manual_val:
+                # User explicitly overrode the price — use their value + currency.
                 base_value = manual_val
                 is_usd = (override_currency == "USD")
+            # else: no override entered — base_value/is_usd remain the KB defaults
+
 
 
         # ── Confirm price basis (per-person vs total package) — always shown,
