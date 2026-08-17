@@ -1111,6 +1111,14 @@ def get_answer(col, question: str, history: list, api_key: str, model: str) -> t
         '  "amount": "Price from KB e.g. INR 1,45,000 per person — omit if not in KB"\n'
         "}\n\n"
 
+        "## PAX / PERSON / ADULT NORMALIZATION\n"
+        "The terms Pax, PAX, Person, Persons, People, Adult, Adults, 'No. of Pax', 'No. of Persons', "
+        "'Number of Adults' all refer to the SAME field: number of people travelling.\n"
+        "- '2 Pax' = '2 Persons' = '2 Adults' — use whichever the user provided, map to the same count.\n"
+        "- If the user provides conflicting values (e.g. '2 Pax' and '3 Adults' in the same message), "
+        "ask for clarification before proceeding.\n"
+        "- In the JSON 'persons' field, always output as 'N Adults' regardless of which synonym was used.\n\n"
+
         "## RULES\n"
         "- Self-drive inclusion ONLY if itinerary has self-drive\n"
         "- Train tickets ONLY if trains are in this itinerary\n"
