@@ -1035,9 +1035,24 @@ def call_gemini(api_key: str, model: str, system: str, user: str) -> str:
 
 
 def get_answer(col, question: str, history: list, api_key: str, model: str) -> tuple[str, list[str], dict]:
-    results = col.query(query_texts=[question], n_results=8)
-    context = "\n\n".join(results["documents"][0])
+    # Primary query
+    results = col.query(query_texts=[question], n_results=12)
+    docs_seen = set(results["documents"][0])
+    all_docs = list(results["documents"][0])
     sources = list({m["source"] for m in results["metadatas"][0]})
+
+    # Always include a secondary hotel-specific retrieval so hotel tables are always in context
+    hotel_query = "hotel accommodation destination star category 5 star 4 star 3 star"
+    h_results = col.query(query_texts=[hotel_query], n_results=8)
+    for d in h_results["documents"][0]:
+        if d not in docs_seen:
+            all_docs.append(d)
+            docs_seen.add(d)
+    for m in h_results["metadatas"][0]:
+        sources.append(m["source"])
+    sources = list(set(sources))
+
+    context = "\n\n".join(all_docs)
 
     history_text = "".join(
         f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}\n"
