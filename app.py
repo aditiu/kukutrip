@@ -230,8 +230,10 @@ def fetch_destination_image(keyword: str, _dbg: list | None = None) -> Path | No
                 new_h = int(w * 9 / 16)
                 top = max(0, (h - new_h) // 4)
                 pil = pil.crop((0, top, w, top + new_h))
-            pil.save(str(cached), "JPEG", quality=92, optimize=True)
-            _log(f"✅ Image downloaded and saved ({w}x{h}px)")
+            # Resize to max 1200×675 — keeps file small for base64 embed in PDF
+            pil.thumbnail((1200, 675), PILImage.LANCZOS)
+            pil.save(str(cached), "JPEG", quality=85, optimize=True)
+            _log(f"✅ Image downloaded and saved ({pil.width}x{pil.height}px)")
             return cached
         else:
             _log(f"⚠️ Image download: status={img_r.status_code}, size={len(img_r.content)}")
