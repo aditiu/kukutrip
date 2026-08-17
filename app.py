@@ -1127,8 +1127,87 @@ def load_docx_text(path: Path) -> str:
     return "\n".join(parts)
 
 
+def extract_all_price_tables(docs_dir: Path) -> str:
+    """
+    Extract EVERY price/rate table from every DOCX in docs_dir, tagged with
+    its package heading, and return them concatenated as a single block.
+
+    WHY THIS EXISTS: with 6+ near-identical pricing tables in one document
+    (same headers "No of Pax | 5 Star | 4 Star... | 3 Star", same row
+    labels "2 Pax / 4 Pax / 6 Pax"), semantic vector similarity search
+    cannot reliably distinguish which table belongs to which package —
+    it may retrieve only PART of a table, or rows from the wrong package,
+    since the embeddings for two different packages' price rows are nearly
+    identical. This caused wrong USD rates to be quoted (e.g. picking the
+    "4 Nights Tbilisi" table's numbers for the "6 Nights - 4 Nights Tbilisi
+    + 2 Nights Batumi" package).
+
+    FIX: bypass retrieval entirely for pricing. Extract the complete,
+    authoritative set of price tables directly from the source documents
+    (already tagged with unique package headings by load_docx_text's
+    reading-order walk) and inject the FULL, UNTRUNCATED block into every
+    LLM call's context. This guarantees the model always sees the
+    complete, correctly-labeled table for every package, rather than a
+    similarity-searched fragment that might belong to a different package.
+    """
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+
+    heading_re = re.compile(r'\bNights?\b|\bDays?\b', re.I)
+    day_re = re.compile(r'^\s*Day\s*\d+\s*:', re.I)
+    non_title_re = re.compile(
+        r'^\s*(Duration|Validity|Cities|Rates|Accommodation|Supplement|'
+        r'No\.?\s*of\s*Pax|Destination)\s*[:\-]', re.I
+    )
+    # Only tables whose header row mentions Pax/Star/Cost are pricing tables
+    price_header_re = re.compile(r'Pax|Star|Cost|Rate|Price|USD|INR', re.I)
+
+    blocks = []
+    for f in sorted(Path(docs_dir).glob("*.docx")):
+        try:
+            doc = Document(f)
+        except Exception:
+            continue
+        body = doc.element.body
+        current_heading = ""
+        for child in body.iterchildren():
+            if child.tag == qn('w:p'):
+                p = Paragraph(child, doc)
+                text = p.text.strip()
+                if not text:
+                    continue
+                if (heading_re.search(text) and not day_re.match(text)
+                        and not non_title_re.match(text) and len(text) < 120):
+                    current_heading = text
+            elif child.tag == qn('w:tbl'):
+                table = Table(child, doc)
+                if not table.rows:
+                    continue
+                headers = [c.text.strip() for c in table.rows[0].cells]
+                header_line = " ".join(headers)
+                if not price_header_re.search(header_line):
+                    continue  # skip non-pricing tables (e.g. hotel-name tables)
+                rows_text = []
+                for row in table.rows[1:]:
+                    cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+                    if not any(cells):
+                        continue
+                    row_text = " | ".join(
+                        f"{h}: {v}" for h, v in zip(headers, cells) if v
+                    )
+                    rows_text.append(row_text)
+                if rows_text and current_heading:
+                    blocks.append(
+                        f"### PRICE TABLE — Package: {current_heading} (source: {f.name})\n"
+                        + "\n".join(rows_text)
+                    )
+    return "\n\n".join(blocks)
+
 
 # ── Vector store ──────────────────────────────────────────────────────────────
+
 
 @st.cache_resource(show_spinner="Building document index…")
 def build_vectorstore():
@@ -1213,6 +1292,25 @@ def get_answer(col, question: str, history: list, api_key: str, model: str) -> t
     sources = list(set(sources))
 
     context = "\n\n".join(all_docs)
+
+    # ── Always inject the COMPLETE, authoritative price tables ──────────────
+    # Semantic retrieval alone is unreliable for pricing data: when a
+    # document contains multiple near-identical price tables (same headers,
+    # same "2 Pax / 4 Pax / 6 Pax" row labels, differing only in the numeric
+    # values), vector similarity search can retrieve a fragment or the WRONG
+    # package's table into context, causing the LLM to quote incorrect
+    # rates. To guarantee correctness, bypass retrieval entirely for price
+    # tables and inject the full, correctly-labeled set directly.
+    price_tables_block = extract_all_price_tables(DOCS_DIR)
+    if price_tables_block:
+        context += (
+            "\n\n## AUTHORITATIVE PRICE TABLES (use these EXACTLY — "
+            "do not use price figures found elsewhere in the context above; "
+            "each table is labeled with its exact package name — match the "
+            "package name precisely before using its rates)\n"
+            + price_tables_block
+        )
+
 
     history_text = "".join(
         f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}\n"
@@ -1610,16 +1708,30 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                 "⚠️ No base package price was found in the knowledge base for this itinerary. "
                 "Please provide a base price manually to continue."
             )
+
+        # ── Manual base price override — always available, with INR/USD toggle ──
+        # Lets the agent overwrite the knowledge-base price (or supply one when
+        # none was found) in either currency. When INR is selected, no
+        # conversion rate step is needed downstream.
+        with st.expander(
+            "✏️ Override base price" if base_value is not None else "✏️ Enter base price",
+            expanded=(base_value is None),
+        ):
+            override_currency = st.radio(
+                "Currency",
+                ["INR", "USD"],
+                key="price_override_currency_input",
+                horizontal=True,
+            )
             manual_amount = st.text_input(
-                "Base package price (numbers only, no currency symbol)",
+                f"Base package price in {override_currency} (numbers only, no currency symbol)",
                 key="price_manual_base",
             )
             manual_val = _extract_amount_value(manual_amount)
             if manual_val:
                 base_value = manual_val
-                is_usd = False  # assume INR if manually entered without currency
-            else:
-                base_value = None
+                is_usd = (override_currency == "USD")
+
 
         # ── Confirm price basis (per-person vs total package) — always shown,
         # defaulted from detection but user-confirmable to avoid ambiguity. ──
