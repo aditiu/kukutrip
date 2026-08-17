@@ -217,28 +217,54 @@ def fetch_destination_image(keyword: str, _dbg: list | None = None) -> Path | No
             _log(f"❌ picsum.photos error: {e}")
         return None
 
-    # Download and convert to landscape JPEG
+    # Download and convert to landscape JPEG — retry up to 3 times
+    for attempt in range(1, 4):
+        try:
+            img_r = requests.get(img_url, proxies=proxies, timeout=45, headers=headers_h)
+            if img_r.status_code == 200 and len(img_r.content) > 15000:
+                from PIL import Image as PILImage
+                from io import BytesIO as BytesIO2
+                pil = PILImage.open(BytesIO2(img_r.content)).convert("RGB")
+                # Crop to 16:9 if portrait
+                w, h = pil.size
+                if h > w:
+                    new_h = int(w * 9 / 16)
+                    top = max(0, (h - new_h) // 4)
+                    pil = pil.crop((0, top, w, top + new_h))
+                # Resize to max 1200×675 — keeps file small for base64 embed in PDF
+                pil.thumbnail((1200, 675), PILImage.LANCZOS)
+                pil.save(str(cached), "JPEG", quality=85, optimize=True)
+                _log(f"✅ Image downloaded and saved ({pil.width}x{pil.height}px, attempt {attempt})")
+                return cached
+            else:
+                _log(f"⚠️ Attempt {attempt}: status={img_r.status_code}, size={len(img_r.content)}")
+                if img_r.status_code in (429, 503) and attempt < 3:
+                    import time; time.sleep(2 * attempt)
+                else:
+                    break
+        except Exception as e:
+            _log(f"❌ Attempt {attempt} error: {e}")
+            if attempt < 3:
+                import time; time.sleep(2)
+
+    # Final fallback after Wikipedia download failure: picsum
     try:
-        img_r = requests.get(img_url, proxies=proxies, timeout=30, headers=headers_h)
+        seed = int(hashlib.md5(keyword.lower().encode()).hexdigest()[:8], 16) % 1000000
+        picsum_url = f"https://picsum.photos/seed/{seed}/1600/900"
+        img_r = requests.get(picsum_url, proxies=proxies, timeout=20,
+                             headers=headers_h, allow_redirects=True)
         if img_r.status_code == 200 and len(img_r.content) > 15000:
             from PIL import Image as PILImage
             from io import BytesIO as BytesIO2
             pil = PILImage.open(BytesIO2(img_r.content)).convert("RGB")
-            # Crop to 16:9 if portrait
-            w, h = pil.size
-            if h > w:
-                new_h = int(w * 9 / 16)
-                top = max(0, (h - new_h) // 4)
-                pil = pil.crop((0, top, w, top + new_h))
-            # Resize to max 1200×675 — keeps file small for base64 embed in PDF
             pil.thumbnail((1200, 675), PILImage.LANCZOS)
             pil.save(str(cached), "JPEG", quality=85, optimize=True)
-            _log(f"✅ Image downloaded and saved ({pil.width}x{pil.height}px)")
+            _log(f"✅ picsum.photos used after Wikipedia download failure")
             return cached
         else:
-            _log(f"⚠️ Image download: status={img_r.status_code}, size={len(img_r.content)}")
+            _log(f"⚠️ picsum fallback also failed: {img_r.status_code}")
     except Exception as e:
-        _log(f"❌ Image download error: {e}")
+        _log(f"❌ picsum fallback error: {e}")
     return None
 
 def _h(text: str) -> str:
