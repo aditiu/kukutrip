@@ -1307,6 +1307,11 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                     img_kw  = meta_stored.get("image_keyword") or meta_stored.get("destination") or "travel landscape"
                     _img_dbg: list = []
                     hdr_img = fetch_destination_image(img_kw, _dbg=_img_dbg)
+                    # If specific keyword fails, try just the destination country
+                    if hdr_img is None:
+                        fallback_kw = meta_stored.get("destination", "travel landscape")
+                        if fallback_kw.lower() != img_kw.lower():
+                            hdr_img = fetch_destination_image(fallback_kw, _dbg=_img_dbg)
                     st.session_state["_img_dbg_msgs"] = _img_dbg  # persist across rerun
                     pdf_b = generate_pdf(pkg_label, "", meta_stored, header_img_path=hdr_img)
                     pdf_n = f"itinerary_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
@@ -1319,6 +1324,13 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                             st.session_state.messages[i]["pdf"]      = pdf_b.hex()
                             st.session_state.messages[i]["pdf_name"] = pdf_n
                             break
+                    # Append image debug info to last assistant message for visibility
+                    if _img_dbg:
+                        img_note = "\n\n*🖼️ Image: " + " | ".join(_img_dbg) + "*"
+                        for i in range(len(st.session_state.messages) - 1, -1, -1):
+                            if st.session_state.messages[i].get("role") == "assistant":
+                                st.session_state.messages[i]["content"] += img_note
+                                break
                     save_session(st.session_state.session_id, st.session_state.messages)
                     st.session_state.pdf_ready = False
                     st.session_state.last_pdf       = pdf_b
