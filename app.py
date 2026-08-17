@@ -1339,7 +1339,17 @@ if col is None:
     st.info("No documents indexed yet — upload files in the sidebar.")
     st.stop()
 
-st.success(f"✅ Indexed **{col.count()}** chunks from {len(existing)} file(s). Ready!")
+# col.count() can fail if persisted DB schema is stale — auto-rebuild if so
+try:
+    chunk_count = col.count()
+except Exception:
+    # Stale/incompatible DB — wipe and rebuild
+    if CHROMA_DIR.exists():
+        shutil.rmtree(CHROMA_DIR)
+    st.cache_resource.clear()
+    st.rerun()
+
+st.success(f"✅ Indexed **{chunk_count}** chunks from {len(existing)} file(s). Ready!")
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
