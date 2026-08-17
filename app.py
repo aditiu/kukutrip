@@ -186,10 +186,12 @@ def fetch_destination_image(keyword: str) -> Path | None:
         img_url = _wikimedia_search_image(keyword, proxies, headers_h)
 
     if not img_url:
-        # Last fallback: Unsplash source (no API key needed)
+        # Last fallback: picsum.photos — reliable, free, no API key, seeded by keyword
         try:
-            unsplash_url = f"https://source.unsplash.com/1600x900/?{keyword.replace(' ', ',')},landscape,travel"
-            img_r = requests.get(unsplash_url, proxies=proxies, timeout=20,
+            import hashlib as _hl
+            seed = int(_hl.md5(keyword.lower().encode()).hexdigest()[:8], 16) % 1000000
+            picsum_url = f"https://picsum.photos/seed/{seed}/1600/900"
+            img_r = requests.get(picsum_url, proxies=proxies, timeout=20,
                                  headers=headers_h, allow_redirects=True)
             if img_r.status_code == 200 and len(img_r.content) > 15000:
                 from PIL import Image as PILImage
