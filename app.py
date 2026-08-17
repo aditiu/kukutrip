@@ -554,10 +554,10 @@ body {{
 }}
 .hero-logo {{
     display: block;
-    margin: 0 auto 8px auto;
-    height: 32px;
+    margin: 0 auto 10px auto;
+    height: 64px;
     width: auto;
-    max-width: 160px;
+    max-width: 320px;
     object-fit: contain;
     opacity: 0.95;
     filter: drop-shadow(0 1px 3px rgba(0,0,0,0.45));
