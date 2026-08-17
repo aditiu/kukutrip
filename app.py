@@ -262,9 +262,10 @@ def generate_pdf(title: str, content: str, meta: dict,
     # ── Embed hero image as base64 data-URI ───────────────────────────────────
     if header_img_path and header_img_path.exists():
         img_b64 = base64.b64encode(header_img_path.read_bytes()).decode()
+        # Dark gradient overlay ensures text is always readable over the photo
         hero_bg = (
-            "linear-gradient(180deg,rgba(75,39,91,0.62) 0%,"
-            "rgba(166,60,85,0.48) 50%,rgba(231,138,82,0.38) 100%),"
+            "linear-gradient(180deg,rgba(30,10,40,0.68) 0%,"
+            "rgba(100,20,40,0.52) 50%,rgba(30,10,40,0.72) 100%),"
             f"url('data:image/jpeg;base64,{img_b64}') center/cover no-repeat"
         )
     else:
@@ -385,11 +386,11 @@ def generate_pdf(title: str, content: str, meta: dict,
         ie_html = f"""
         <div class="ie-row">
           <div class="inc-card">
-            <div class="inc-title">✅ Inclusions</div>
+            <div class="inc-title"><span class="chk">&#10003;</span> Inclusions</div>
             <ul>{inc_items}</ul>
           </div>
           <div class="exc-card">
-            <div class="exc-title">❌ Exclusions</div>
+            <div class="exc-title"><span class="xmark">&#10005;</span> Exclusions</div>
             <ul>{exc_items}</ul>
           </div>
         </div>"""
@@ -718,6 +719,22 @@ body {{
     font-size: 12px;
     font-weight: bold;
     margin-bottom: 6px;
+}}
+.chk {{
+    display: inline-block;
+    color: #3B7D44;
+    font-weight: bold;
+    font-size: 13px;
+    line-height: 1;
+    margin-right: 3px;
+}}
+.xmark {{
+    display: inline-block;
+    color: #A52A2A;
+    font-weight: bold;
+    font-size: 13px;
+    line-height: 1;
+    margin-right: 3px;
 }}
 .inc-card ul, .exc-card ul {{
     padding-left: 13px;
