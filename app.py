@@ -287,6 +287,15 @@ def generate_pdf(title: str, content: str, meta: dict,
     import base64
     from weasyprint import HTML as WH
 
+    # ── Embed company logo (coollogo.png) ─────────────────────────────────────
+    logo_tag = ""
+    logo_path = _APP_DIR / "template" / "coollogo.png"
+    if logo_path.exists():
+        logo_b64 = base64.b64encode(logo_path.read_bytes()).decode()
+        logo_tag = (
+            f'<img class="hero-logo" src="data:image/png;base64,{logo_b64}" />'
+        )
+
     # ── Embed hero image as base64 data-URI ───────────────────────────────────
     if header_img_path and header_img_path.exists():
         img_b64 = base64.b64encode(header_img_path.read_bytes()).decode()
@@ -542,6 +551,16 @@ body {{
     text-align: center;
     margin-left: auto;
     margin-right: auto;
+}}
+.hero-logo {{
+    display: block;
+    margin: 0 auto 8px auto;
+    height: 32px;
+    width: auto;
+    max-width: 160px;
+    object-fit: contain;
+    opacity: 0.95;
+    filter: drop-shadow(0 1px 3px rgba(0,0,0,0.45));
 }}
 
 /* ── PILLS ────────────────────────────────────────────── */
@@ -830,6 +849,7 @@ body {{
   <!-- HERO -->
   <div class="hero">
     <div class="hero-content">
+      {logo_tag}
       <div class="hero-title">{pkg_name}</div>
       {f'<div class="hero-route">{route_txt}</div>' if route_txt else ''}
       {f'<div class="hero-dates">{hero_dates}</div>' if hero_dates else ''}
