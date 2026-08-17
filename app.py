@@ -276,6 +276,67 @@ def _h(text: str) -> str:
             .replace('"', "&quot;"))
 
 
+def _extract_amount_value(amount_str: str) -> float | None:
+    """Extract the first numeric value from a price string, ignoring currency symbols/commas."""
+    if not amount_str:
+        return None
+    m = re.search(r'[\d,]+(?:\.\d+)?', str(amount_str))
+    if not m:
+        return None
+    try:
+        return float(m.group().replace(",", ""))
+    except Exception:
+        return None
+
+
+def _extract_persons_count(persons_str: str) -> int:
+    """Extract number of adults/persons from a string like '4 Adults · 1 Room'."""
+    try:
+        m = re.search(r'(\d+)\s*[Aa]dult', persons_str or "")
+        if m:
+            return max(1, int(m.group(1)))
+    except Exception:
+        pass
+    return 1
+
+
+def _is_usd_amount(amount_str: str) -> bool:
+    """Detect whether a price string is denominated in USD."""
+    return bool(re.search(r'USD|US\$|\$', str(amount_str or ""), re.I))
+
+
+def _format_inr(amount: float) -> str:
+    """Format a number using Indian digit grouping, e.g. 400000 -> '4,00,000'."""
+    n = int(round(amount))
+    sign = "-" if n < 0 else ""
+    n = abs(n)
+    s = str(n)
+    if len(s) <= 3:
+        return sign + s
+    last3 = s[-3:]
+    rest = s[:-3]
+    parts = []
+    while len(rest) > 2:
+        parts.insert(0, rest[-2:])
+        rest = rest[:-2]
+    if rest:
+        parts.insert(0, rest)
+    return sign + ",".join(parts) + "," + last3
+
+
+def _parse_markup(markup_raw: str, base_amount: float) -> float:
+    """Parse a markup string (percentage or fixed amount) and return the markup value in INR."""
+    markup_raw = (markup_raw or "").strip()
+    if "%" in markup_raw:
+        m = re.search(r'[\d.]+', markup_raw)
+        pct = float(m.group()) if m else 0.0
+        return base_amount * (pct / 100.0)
+    val = _extract_amount_value(markup_raw)
+    return val or 0.0
+
+
+
+
 def generate_pdf(title: str, content: str, meta: dict,
                  header_img_path: Path | None = None) -> bytes:
     """
@@ -328,10 +389,18 @@ def generate_pdf(title: str, content: str, meta: dict,
         for p in pill_items if p
     )
 
-    # ── Price fallback: generate reasonable placeholder if missing ─────────────
-    amount = meta.get("amount", "")
-    if not amount or "not available" in str(amount).lower():
-        # Generate a placeholder based on nights × travellers × daily rate
+    # ── Final customer-facing price ─────────────────────────────────────────
+    # If a finalized price has been computed via the pricing workflow
+    # (_final_price_label / _final_price_value), use that exclusively.
+    # Never fall back to showing raw/base/USD amounts on the customer PDF.
+    final_label = meta.get("_final_price_label", "")
+    final_value = meta.get("_final_price_value", "")
+
+    if final_value:
+        price_label_text = final_label or "TOTAL PACKAGE COST"
+        amount_display = final_value
+    else:
+        # Price workflow not yet run — generate a reasonable placeholder
         nights_num = 0
         try:
             nights_num = int(re.search(r'(\d+)\s*[Nn]ight', meta.get("nights", "0")).group(1))
@@ -346,17 +415,19 @@ def generate_pdf(title: str, content: str, meta: dict,
         placeholder_amt = max(15000, nights_num * persons_num * 5000)
         # Round to nearest 5000
         placeholder_amt = (placeholder_amt // 5000) * 5000
-        amount = f"INR {placeholder_amt:,}/- (approx.)"
+        amount_display = f"INR {placeholder_amt:,}/- (approx.)"
+        price_label_text = "TOTAL PACKAGE COST"
 
     # ── Package price HTML (uses computed amount with fallback) ────────────────
     persons_rooms = "   ·   ".join(filter(None, [
         meta.get("persons", ""), meta.get("transport", "")]))
     price_html = f"""
         <div class="price-card">
-          <div class="price-label">TOTAL PACKAGE COST</div>
-          <div class="price">{_h(str(amount))}</div>
+          <div class="price-label">{_h(price_label_text.upper())}</div>
+          <div class="price">{_h(str(amount_display))}</div>
           <div class="price-meta">{_h(persons_rooms)}</div>
         </div>"""
+
 
     # ── Day cards ─────────────────────────────────────────────────────────────
     days_html = ""
@@ -1418,6 +1489,10 @@ if prompt := st.chat_input("e.g. Plan a 5-day Georgia trip for 2 adults + 1 kid,
         if meta and not answer.startswith("❌"):
             st.session_state.pending_meta = meta
             st.session_state.pdf_ready = True
+            # Reset pricing workflow state for the new itinerary
+            for _k in ("price_conv_rate", "price_display_mode", "price_markup_raw",
+                       "price_workflow_done", "final_price_label", "final_price_value"):
+                st.session_state.pop(_k, None)
         elif not answer.startswith("❌"):
             # A clarification/question reply — itinerary not yet ready
             st.session_state.pdf_ready = False
@@ -1435,23 +1510,117 @@ if prompt := st.chat_input("e.g. Plan a 5-day Georgia trip for 2 adults + 1 kid,
         st.rerun()
 
 
-# ── Itinerary Ready Card + Generate PDF Button ────────────────────────────────
+# ── Itinerary Ready Card + Pricing Workflow + Generate PDF Button ─────────────
 if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
     meta_stored = st.session_state.pending_meta
     pkg_label = meta_stored.get("package_name") or meta_stored.get("destination") or "Itinerary"
 
+    raw_amount = meta_stored.get("amount", "")
+    base_value = _extract_amount_value(raw_amount)
+    is_usd = _is_usd_amount(raw_amount)
+    persons_count = _extract_persons_count(meta_stored.get("persons", ""))
+
     with st.container(border=True):
         st.success(f"✅ **Itinerary Ready** — {pkg_label}")
-        st.caption("All required information has been confirmed. Click below to generate your PDF.")
+        st.caption("Complete the pricing steps below, then generate your PDF.")
 
         # Show persistent image fetch debug info (survives rerun)
         if st.session_state.get("_img_dbg_msgs"):
             for _m in st.session_state["_img_dbg_msgs"]:
                 st.caption(f"🖼️ {_m}")
 
-        if st.button("📄 Generate PDF", type="primary", use_container_width=True):
+        if base_value is None:
+            st.warning(
+                "⚠️ No base package price was found in the knowledge base for this itinerary. "
+                "Please provide a base price manually to continue."
+            )
+            manual_amount = st.text_input(
+                "Base package price (numbers only, no currency symbol)",
+                key="price_manual_base",
+            )
+            manual_val = _extract_amount_value(manual_amount)
+            if manual_val:
+                base_value = manual_val
+                is_usd = False  # assume INR if manually entered without currency
+            else:
+                base_value = None
+
+        conv_rate = None
+        if base_value is not None and is_usd:
+            st.markdown("**Step 1 — USD → INR Conversion Rate**")
+            conv_rate_raw = st.text_input(
+                "What is the USD → INR conversion rate to use?",
+                key="price_conv_rate_input",
+                placeholder="e.g. 84.5",
+            )
+            conv_rate = _extract_amount_value(conv_rate_raw)
+            if conv_rate_raw and not conv_rate:
+                st.error("Please enter a valid numeric conversion rate.")
+
+        # Base price in INR (after conversion if needed)
+        base_inr = None
+        if base_value is not None:
+            if is_usd:
+                if conv_rate:
+                    base_inr = base_value * conv_rate
+            else:
+                base_inr = base_value
+
+        display_mode = None
+        markup_raw = None
+        if base_inr is not None:
+            st.markdown("**Step 2 — Price Display in PDF**")
+            display_mode = st.radio(
+                "How would you like the price to be shown in the PDF?",
+                ["Price Per Person", "Total Package Price"],
+                key="price_display_mode_input",
+                horizontal=True,
+            )
+
+            st.markdown("**Step 3 — Markup**")
+            markup_raw = st.text_input(
+                "What markup would you like to add to the base package price? "
+                "(percentage e.g. 15% or fixed amount e.g. 20000)",
+                key="price_markup_input",
+                placeholder="e.g. 15% or 20000",
+            )
+
+        # ── Compute final customer-facing price ─────────────────────────────
+        final_label = None
+        final_value_str = None
+        ready_to_generate = False
+
+        if base_inr is not None and display_mode and markup_raw:
+            markup_val = _parse_markup(markup_raw, base_inr)
+            total_final = base_inr + markup_val
+            if display_mode == "Price Per Person":
+                per_person = total_final / max(1, persons_count)
+                final_label = "Price Per Person"
+                final_value_str = f"₹{_format_inr(per_person)} / person"
+            else:
+                final_label = "Total Package Price"
+                final_value_str = f"₹{_format_inr(total_final)}"
+            ready_to_generate = True
+
+        if ready_to_generate:
+            st.info(f"**{final_label}:** {final_value_str}")
+
+        gen_disabled = not ready_to_generate
+        if gen_disabled:
+            st.caption(
+                "⏳ Complete all pricing steps above (conversion rate if applicable, "
+                "price display option, and markup) before generating the PDF."
+            )
+
+        if st.button("📄 Generate PDF", type="primary", use_container_width=True, disabled=gen_disabled):
             with st.spinner("Generating PDF — fetching destination image…"):
                 try:
+                    # Inject only the final computed price into meta — never the
+                    # base/USD/markup/conversion details, per pricing policy.
+                    meta_for_pdf = dict(meta_stored)
+                    meta_for_pdf["_final_price_label"] = final_label
+                    meta_for_pdf["_final_price_value"] = final_value_str
+
                     img_kw  = meta_stored.get("image_keyword") or meta_stored.get("destination") or "travel landscape"
                     _img_dbg: list = []
                     hdr_img = fetch_destination_image(img_kw, _dbg=_img_dbg)
@@ -1461,7 +1630,7 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                         if fallback_kw.lower() != img_kw.lower():
                             hdr_img = fetch_destination_image(fallback_kw, _dbg=_img_dbg)
                     st.session_state["_img_dbg_msgs"] = _img_dbg  # persist across rerun
-                    pdf_b = generate_pdf(pkg_label, "", meta_stored, header_img_path=hdr_img)
+                    pdf_b = generate_pdf(pkg_label, "", meta_for_pdf, header_img_path=hdr_img)
                     pdf_n = f"itinerary_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
                     # Save PDF to template dir
                     TEMPLATE_DIR.mkdir(exist_ok=True)
