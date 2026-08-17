@@ -1071,6 +1071,8 @@ def get_answer(col, question: str, history: list, api_key: str, model: str) -> t
         "- Self-drive inclusion ONLY if itinerary has self-drive\n"
         "- Train tickets ONLY if trains are in this itinerary\n"
         "- Price from KB only; omit field if not available\n"
+        "- HOTEL NAMES: Use the EXACT hotel name from the knowledge base documents. "
+        "Never invent or substitute hotel names. If the KB lists 'Hotel XYZ' for a city, use that verbatim.\n"
         "- Do NOT generate ---JSON--- until all selections confirmed\n\n"
 
         f"## KNOWLEDGE BASE\n{context}\n\n"
