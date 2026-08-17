@@ -305,6 +305,13 @@ def _is_usd_amount(amount_str: str) -> bool:
     return bool(re.search(r'USD|US\$|\$', str(amount_str or ""), re.I))
 
 
+def _is_per_person_amount(amount_str: str) -> bool:
+    """Detect whether a price string is denominated per person (vs. total package)."""
+    return bool(re.search(r'per\s*person|per\s*pax|/\s*person|/\s*pax|\bpp\b',
+                          str(amount_str or ""), re.I))
+
+
+
 def _format_inr(amount: float) -> str:
     """Format a number using Indian digit grouping, e.g. 400000 -> '4,00,000'."""
     n = int(round(amount))
@@ -1518,7 +1525,9 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
     raw_amount = meta_stored.get("amount", "")
     base_value = _extract_amount_value(raw_amount)
     is_usd = _is_usd_amount(raw_amount)
+    is_per_person = _is_per_person_amount(raw_amount) if raw_amount else None
     persons_count = _extract_persons_count(meta_stored.get("persons", ""))
+
 
     with st.container(border=True):
         st.success(f"✅ **Itinerary Ready** — {pkg_label}")
@@ -1537,7 +1546,6 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
         if base_value is None:
             st.warning(
                 "⚠️ No base package price was found in the knowledge base for this itinerary. "
-
                 "Please provide a base price manually to continue."
             )
             manual_amount = st.text_input(
@@ -1551,6 +1559,19 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
             else:
                 base_value = None
 
+        # ── Confirm price basis (per-person vs total package) — always shown,
+        # defaulted from detection but user-confirmable to avoid ambiguity. ──
+        if base_value is not None:
+            basis_default_idx = 0 if is_per_person else 1
+            basis_choice = st.radio(
+                "Confirm: is the base price above per person or total package price?",
+                ["Per Person", "Total Package"],
+                index=basis_default_idx,
+                key="price_basis_confirm_input",
+                horizontal=True,
+            )
+            is_per_person = (basis_choice == "Per Person")
+
         conv_rate = None
         if base_value is not None and is_usd:
             st.markdown("**Step 1 — USD → INR Conversion Rate**")
@@ -1563,7 +1584,10 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
             if conv_rate_raw and not conv_rate:
                 st.error("Please enter a valid numeric conversion rate.")
 
-        # Base price in INR (after conversion if needed)
+        # Base price in INR (after conversion if needed) — remains on the
+        # SAME basis (per-person or total) as the original amount; this basis
+        # carries through agent markup and markup, and is only resolved to
+        # the user's chosen display format in the final step.
         base_inr = None
         if base_value is not None:
             if is_usd:
@@ -1571,6 +1595,7 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                     base_inr = base_value * conv_rate
             else:
                 base_inr = base_value
+
 
         agent_markup_raw = None
         if base_inr is not None:
@@ -1623,19 +1648,30 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
             )
 
         # ── Compute final customer-facing price ─────────────────────────────
+        # `total_final` is on the SAME basis as the original base amount
+        # (per-person or total package), tracked via `is_per_person`.
+        # Convert to whichever basis the user wants displayed, without
+        # ever double-dividing/multiplying by persons_count.
         final_label = None
         final_value_str = None
         ready_to_generate = False
 
         if total_final is not None and display_mode:
+            if is_per_person:
+                per_person_amt = total_final
+                total_amt = total_final * max(1, persons_count)
+            else:
+                total_amt = total_final
+                per_person_amt = total_final / max(1, persons_count)
+
             if display_mode == "Price Per Person":
-                per_person = total_final / max(1, persons_count)
                 final_label = "Price Per Person"
-                final_value_str = f"₹{_format_inr(per_person)} / person"
+                final_value_str = f"₹{_format_inr(per_person_amt)} / person"
             else:
                 final_label = "Total Package Price"
-                final_value_str = f"₹{_format_inr(total_final)}"
+                final_value_str = f"₹{_format_inr(total_amt)}"
             ready_to_generate = True
+
 
         if ready_to_generate:
             st.info(f"**{final_label}:** {final_value_str}")
