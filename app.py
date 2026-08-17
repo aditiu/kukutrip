@@ -22,10 +22,12 @@ if _proxy:
 
 import streamlit as st
 
-DOCS_DIR     = Path(__file__).parent / "docs"
-CHROMA_DIR   = Path(__file__).parent / ".chroma_db"
-HISTORY_DIR  = Path(__file__).parent / ".chat_history"
-TEMPLATE_DIR = Path(__file__).parent / "template"
+# ── Paths — writable dirs use /tmp/ for Streamlit Community Cloud ──────────────
+_APP_DIR     = Path(__file__).parent
+DOCS_DIR     = _APP_DIR / "docs"
+CHROMA_DIR   = Path("/tmp/.chroma_db")
+HISTORY_DIR  = Path("/tmp/.chat_history")
+TEMPLATE_DIR = Path("/tmp/template")
 RETENTION    = 5   # days
 
 # ── Company branding (constant across all itineraries) ────────────────────────
@@ -76,7 +78,7 @@ if "session_id" not in st.session_state:
 
 # ── PDF generation — Italy template pixel-perfect replication ─────────────────
 
-HEADER_CACHE = Path(__file__).parent / ".header_cache"
+HEADER_CACHE = Path("/tmp/.header_cache")
 HEADER_CACHE.mkdir(exist_ok=True)
 
 def _wiki_image(search: str, proxies: dict, headers: dict) -> str | None:
@@ -1073,10 +1075,14 @@ with st.sidebar:
     st.title("✈ Travel Agent")
     st.caption("Powered by Gemini + ChromaDB")
 
+    _default_key = (
+        st.secrets.get("GOOGLE_API_KEY", "")
+        if hasattr(st, "secrets") else ""
+    ) or os.environ.get("GOOGLE_API_KEY", "")
     api_key = st.text_input(
         "Google Gemini API Key", type="password",
-        value=os.environ.get("GOOGLE_API_KEY", ""),
-        help="Free key from https://aistudio.google.com",
+        value=_default_key,
+        help="Free key from https://aistudio.google.com — or set GOOGLE_API_KEY in Streamlit secrets.",
     )
     model = st.selectbox(
         "Model",
@@ -1243,10 +1249,7 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                 try:
                     img_kw  = meta_stored.get("image_keyword") or meta_stored.get("destination") or "travel landscape"
                     hdr_img = fetch_destination_image(img_kw)
-                    if not hdr_img:
-                        fb = Path(__file__).parent / "template" / "header_bg.jpg"
-                        if fb.exists():
-                            hdr_img = fb
+                    # No fallback to template/header_bg.jpg — use gradient-only hero if no image found
                     pdf_b = generate_pdf(pkg_label, "", meta_stored, header_img_path=hdr_img)
                     pdf_n = f"itinerary_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
                     # Save PDF to template dir
