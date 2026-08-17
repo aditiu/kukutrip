@@ -22,10 +22,12 @@ if _proxy:
 
 import streamlit as st
 
-DOCS_DIR     = Path(__file__).parent / "docs"
-CHROMA_DIR   = Path(__file__).parent / ".chroma_db"
-HISTORY_DIR  = Path(__file__).parent / ".chat_history"
-TEMPLATE_DIR = Path(__file__).parent / "template"
+# ── Paths — writable dirs use /tmp/ for Streamlit Community Cloud ──────────────
+_APP_DIR     = Path(__file__).parent
+DOCS_DIR     = _APP_DIR / "docs"          # read-only in repo — OK
+CHROMA_DIR   = Path("/tmp/.chroma_db")    # writable on Streamlit Cloud
+HISTORY_DIR  = Path("/tmp/.chat_history") # writable on Streamlit Cloud
+TEMPLATE_DIR = Path("/tmp/template")      # writable on Streamlit Cloud
 RETENTION    = 5   # days
 
 # ── Company branding (constant across all itineraries) ────────────────────────
@@ -76,7 +78,7 @@ if "session_id" not in st.session_state:
 
 # ── PDF generation — Italy template pixel-perfect replication ─────────────────
 
-HEADER_CACHE = Path(__file__).parent / ".header_cache"
+HEADER_CACHE = Path("/tmp/.header_cache")   # /tmp/ is writable on Streamlit Cloud
 HEADER_CACHE.mkdir(exist_ok=True)
 
 def _wiki_image(search: str, proxies: dict, headers: dict) -> str | None:
@@ -1073,10 +1075,15 @@ with st.sidebar:
     st.title("✈ Travel Agent")
     st.caption("Powered by Gemini + ChromaDB")
 
+    # Read API key from Streamlit secrets (Cloud) or env var (local)
+    _default_key = (
+        st.secrets.get("GOOGLE_API_KEY", "")
+        if hasattr(st, "secrets") else ""
+    ) or os.environ.get("GOOGLE_API_KEY", "")
     api_key = st.text_input(
         "Google Gemini API Key", type="password",
-        value=os.environ.get("GOOGLE_API_KEY", ""),
-        help="Free key from https://aistudio.google.com",
+        value=_default_key,
+        help="Free key from https://aistudio.google.com — or set GOOGLE_API_KEY in Streamlit secrets.",
     )
     model = st.selectbox(
         "Model",
