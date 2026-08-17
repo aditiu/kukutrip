@@ -1,0 +1,10 @@
+.venv/
+.chroma_db/
+.chat_history/
+.header_cache/
+__pycache__/
+*.pyc
+template/itinerary_*.pdf
+template/italy_v*.pdf
+template/georgia_v*.pdf
+*.zip
