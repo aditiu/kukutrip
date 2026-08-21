@@ -2804,6 +2804,38 @@ def render_paste_content_mode(api_key, model, selected_theme_name):
         "assistant. The content will be analyzed and converted into the KukuTrip "
         "PDF format automatically."
     )
+    with st.expander("📋 Copy prompt template (use this in ChatGPT/Claude/Gemini first)"):
+        st.caption(
+            "Copy this prompt into your AI assistant of choice, fill in the trip "
+            "details, and paste the AI's response into the box below to generate "
+            "a KukuTrip-formatted PDF."
+        )
+        st.code(PASTE_MODE_PROMPT_TEMPLATE, language=None)
+
+    with st.expander("📋 Copy prompt template (use this in ChatGPT/Claude/Gemini first)"):
+        st.caption(
+            "Copy this prompt into your AI assistant of choice, fill in the trip "
+            "details, and paste the AI's response into the box below to generate "
+            "a KukuTrip-formatted PDF."
+        )
+        st.code(PASTE_MODE_PROMPT_TEMPLATE, language=None)
+
+    with st.expander("📋 Copy prompt template (use this in ChatGPT/Claude/Gemini first)"):
+        st.caption(
+            "Copy this prompt into your AI assistant of choice, fill in the trip "
+            "details, and paste the AI's response into the box below to generate "
+            "a KukuTrip-formatted PDF."
+        )
+        st.code(PASTE_MODE_PROMPT_TEMPLATE, language=None)
+
+    with st.expander("📋 Copy prompt template (use this in ChatGPT/Claude/Gemini first)"):
+        st.caption(
+            "Copy this prompt into your AI assistant of choice, fill in the trip "
+            "details, and paste the AI's response into the box below to generate "
+            "a KukuTrip-formatted PDF."
+        )
+        st.code(PASTE_MODE_PROMPT_TEMPLATE, language=None)
+
     raw_content = st.text_area("Paste your content", height=350, key="paste_raw_content",
                                 placeholder="Paste your AI-generated itinerary here…")
     st.caption(f"🎨 Using PDF Theme: **{selected_theme_name}** (change in sidebar)")
