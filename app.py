@@ -2796,6 +2796,325 @@ def analyze_pasted_content(raw_content, api_key, model):
             raise ValueError("Could not extract structured itinerary data from the pasted content.")
     return _normalize_pdf_meta(meta)
 
+PASTE_MODE_PROMPT_TEMPLATE = """Create a detailed travel itinerary in the following **KukuTrip travel-agent format**.
+
+The output will be copied directly into another application, where the content will be analyzed and converted into a professionally designed PDF.
+
+## IMPORTANT OUTPUT RULES
+
+* Follow the structure below closely.
+* Do NOT explain the format.
+* Do NOT add conversational introductions or conclusions.
+* Do NOT use JSON.
+* Do NOT use XML.
+* Do NOT provide code.
+* Do NOT include comments about how the itinerary was created.
+* Use clean headings, numbered days, dates, and bullet points.
+* Keep the output suitable for direct copy/paste into a travel itinerary PDF generator.
+* Use factual information provided in the request.
+* If a detail is not provided, do not invent it.
+* Clearly mark estimates or assumptions if they are explicitly requested.
+* Keep the itinerary professional and travel-agent friendly.
+
+---
+
+# REQUIRED FORMAT
+
+## Trip Header
+
+Start with:
+
+**[START DATE] – [END DATE] [DURATION] [TRAVELER COUNT] [TRANSPORT TYPE]**
+
+Example:
+
+05 Oct – 14 Oct 2026
+9 Nights / 10 Days
+2 Adults · 0 Children · 1 Room
+Private Transfers + High-Speed Trains
+
+Then:
+
+**Day-wise Itinerary**
+
+**[TRIP TITLE IN UPPERCASE]**
+
+[City 1] · [City 2] · [City 3]
+
+[START DATE] – [END DATE]
+
+---
+
+# DAY-WISE FORMAT
+
+For every day use this structure:
+
+### [DAY NUMBER]
+
+## [DAY TITLE]
+
+[DATE]
+
+• [Activity / detail]
+• [Activity / detail]
+• [Activity / detail]
+• [Activity / detail]
+• [Activity / detail]
+• [Activity / detail]
+• Overnight in [City]
+
+Each day should contain meaningful details rather than a short one-line summary.
+
+Include, where applicable:
+
+* Breakfast
+* Departure time
+* Check-out
+* Check-in
+* Driving distance
+* Approximate driving time
+* Train journey
+* Airport transfer
+* Sightseeing
+* Attractions
+* Activities
+* Meals
+* Free time
+* Shopping
+* Hotel
+* Overnight location
+
+---
+
+# EXAMPLE DAY
+
+### 1
+
+## Arrival in Rome
+
+05 OCT
+
+• Arrival at Rome Fiumicino Airport.
+• Meet the driver at the arrivals area.
+• Transfer to the hotel for check-in.
+• Standard check-in time – 15:00.
+• Free time to freshen up and relax.
+• Evening visit to Piazza Navona.
+• Visit the Trevi Fountain.
+• Enjoy dinner at a local Italian restaurant.
+• Overnight in Rome.
+
+---
+
+# HOTELS SECTION
+
+After the day-wise itinerary, add:
+
+## Hotels Confirmed
+
+Use a table:
+
+| City / Nights       | Hotel             | Dates   | Meal Plan       |
+| -------------------- | ------------------ | ------- | ---------------- |
+| Rome (3 Nights)     | [Hotel] / Similar | [Dates] | Bed & Breakfast |
+| Florence (2 Nights) | [Hotel] / Similar | [Dates] | Bed & Breakfast |
+
+If hotels are not provided, use:
+
+**To be confirmed**
+
+Do not invent hotel names.
+
+---
+
+# TOTAL PACKAGE PRICE
+
+Add:
+
+## TOTAL PACKAGE PRICE
+
+[Adults] · [Children] · [Rooms] · [Transport]
+
+[Currency + Amount]
+
+If the user has not provided a price, write:
+
+**Price to be confirmed**
+
+Do not invent a package price.
+
+---
+
+# PACKAGE HIGHLIGHTS
+
+Add:
+
+## Package Highlights
+
+Provide 4–8 concise highlights based ONLY on the itinerary.
+
+Example:
+
+• Colosseum & Ancient Rome
+• Vatican Museums & Sistine Chapel
+• Florence Renaissance Experience
+• Venice Gondola Ride
+• Lake Como Excursion
+
+Do not introduce activities that are not included in the itinerary.
+
+---
+
+# INCLUSIONS
+
+Add:
+
+## ✓ Inclusions
+
+Include only services actually mentioned or explicitly included in the request.
+
+Examples:
+
+• Accommodation as specified
+• Daily breakfast
+• Airport transfers
+• Private transportation
+• High-speed train tickets
+• English-speaking guide
+• Sightseeing excursions
+• Entrance tickets specifically mentioned
+• Local taxes and charges
+
+Do not automatically assume something is included.
+
+---
+
+# EXCLUSIONS
+
+Add:
+
+## ✕ Exclusions
+
+Include exclusions provided by the user.
+
+If the user has not provided explicit exclusions, use only reasonable generic categories when requested, such as:
+
+• International flights
+• Travel insurance
+• Personal expenses
+• Tips
+• Meals not mentioned in the itinerary
+• Services not mentioned in the program
+
+Do not state that a service is excluded if the user explicitly said it is included.
+
+---
+
+# IMPORTANT NOTES
+
+Add:
+
+## ⚑ Important Notes
+
+Include practical information relevant to the itinerary, but do NOT introduce unsupported factual claims.
+
+Examples:
+
+• Hotel check-in and check-out times are subject to hotel policy.
+• Comfortable walking shoes are recommended.
+• Attraction timings are subject to availability.
+• Train timings are subject to availability.
+• Any additional sightseeing not mentioned in the itinerary may incur additional costs.
+• Any increase in applicable taxes or transportation costs may be recovered from the guest.
+
+Only include commercial/payment conditions if they were provided by the user or explicitly requested.
+
+---
+
+# CONTENT STYLE
+
+The final output should look like a professional travel company's itinerary document.
+
+Use:
+
+* Clear section hierarchy
+* Short paragraphs
+* Bullet points beginning with `•`
+* Numbered days
+* Dates in `DD MMM`
+* City names consistently
+* Professional travel terminology
+* Concise but sufficiently detailed descriptions
+
+Avoid:
+
+* Long conversational paragraphs
+* Marketing-heavy language
+* Excessive emojis
+* "Here is your itinerary..."
+* "I hope you enjoy..."
+* AI commentary
+* Markdown code blocks
+* JSON
+* Explanations outside the itinerary
+
+---
+
+# DATA INTEGRITY
+
+The itinerary will later be processed automatically by a PDF generator.
+
+Therefore:
+
+1. Never invent hotel names.
+2. Never invent prices.
+3. Never invent flight details.
+4. Never invent travel dates.
+5. Never invent traveler counts.
+6. Never invent included services.
+7. Never invent attraction tickets.
+8. Never add activities that were not requested.
+9. If information is unavailable, write **To be confirmed** where appropriate.
+10. Preserve all information supplied by the user.
+
+---
+
+# INPUT
+
+Create the itinerary using the following trip information:
+
+**Destination:** [DESTINATION]
+
+**Travel Dates:** [START DATE] – [END DATE]
+
+**Travelers:** [ADULTS] Adults · [CHILDREN] Children · [ROOMS] Rooms
+
+**Transportation:** [TRANSPORTATION]
+
+**Cities / Route:** [ROUTE]
+
+**Hotels:** [HOTELS, IF AVAILABLE]
+
+**Budget / Package Price:** [PRICE, IF AVAILABLE]
+
+**Special Requirements:** [SPECIAL REQUIREMENTS]
+
+**Places / Activities Requested:**
+[LIST OF REQUESTED PLACES AND ACTIVITIES]
+
+**Inclusions:**
+[INCLUSIONS]
+
+**Exclusions:**
+[EXCLUSIONS]
+
+**Important Notes:**
+[IMPORTANT NOTES]
+
+Now generate the complete itinerary using the KukuTrip format above.
+"""
+
+
 def render_paste_content_mode(api_key, model, selected_theme_name):
     """Isolated UI for Paste Content → PDF. Never touches Knowledge Base/RAG."""
     st.title("✈ Travel Itinerary Agent")
@@ -2804,30 +3123,6 @@ def render_paste_content_mode(api_key, model, selected_theme_name):
         "assistant. The content will be analyzed and converted into the KukuTrip "
         "PDF format automatically."
     )
-    with st.expander("📋 Copy prompt template (use this in ChatGPT/Claude/Gemini first)"):
-        st.caption(
-            "Copy this prompt into your AI assistant of choice, fill in the trip "
-            "details, and paste the AI's response into the box below to generate "
-            "a KukuTrip-formatted PDF."
-        )
-        st.code(PASTE_MODE_PROMPT_TEMPLATE, language=None)
-
-    with st.expander("📋 Copy prompt template (use this in ChatGPT/Claude/Gemini first)"):
-        st.caption(
-            "Copy this prompt into your AI assistant of choice, fill in the trip "
-            "details, and paste the AI's response into the box below to generate "
-            "a KukuTrip-formatted PDF."
-        )
-        st.code(PASTE_MODE_PROMPT_TEMPLATE, language=None)
-
-    with st.expander("📋 Copy prompt template (use this in ChatGPT/Claude/Gemini first)"):
-        st.caption(
-            "Copy this prompt into your AI assistant of choice, fill in the trip "
-            "details, and paste the AI's response into the box below to generate "
-            "a KukuTrip-formatted PDF."
-        )
-        st.code(PASTE_MODE_PROMPT_TEMPLATE, language=None)
-
     with st.expander("📋 Copy prompt template (use this in ChatGPT/Claude/Gemini first)"):
         st.caption(
             "Copy this prompt into your AI assistant of choice, fill in the trip "
