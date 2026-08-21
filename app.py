@@ -36,7 +36,108 @@ COMPANY_PHONE = "+918929838899"
 COMPANY_WEB   = "www.kukutrip.com"
 COMPANY_EMAIL = "info@kukutrip.com"
 
+# ── PDF Theme System ────────────────────────────────────────────────────────
+# Centralized theme configuration — the SINGLE source of truth for every
+# color used anywhere in PDF generation. No hex codes should be hardcoded
+# inside generate_pdf()/generate_pdf_editorial(); they must all be looked up
+# from the selected theme dict below via semantic keys (theme["primary"],
+# theme["accent"], etc.). This is what lets a new theme be added later by
+# just adding a new dict entry, without touching the PDF templates at all.
+#
+# Each theme declares a "layout":
+#   "classic"   → the original KukuTrip design (gradient hero, rounded
+#                 cards, pill badges) — see generate_pdf(). All 7 color
+#                 themes below share this exact layout; only the palette
+#                 changes.
+#   "editorial" → the alternate document-style layout inspired by the
+#                 reference Georgia_Tbilisi_Grand_Explorer_Itinerary PDF —
+#                 see generate_pdf_editorial(). Cleaner typography, no
+#                 hero photo, large day numbers, thin rule dividers.
+#
+# Semantic keys used by both layouts:
+#   primary        — main heading / accent color
+#   primary_dark   — darker shade, used for gradient starts / hero overlay
+#   primary_light  — lighter shade, used for secondary gradient stops
+#   accent         — secondary highlight color (gold for Navy & Gold, a
+#                    restrained bronze for Modern Editorial, etc.) — used
+#                    for price/footer gradients and day-number accents
+#   pill_bg/pill_border/pill_text — metadata pill badge styling (classic)
+#   bg_light       — subtle tinted background for cards/sections
+#   hotel_row_alt  — alternating hotel-table row background
+#   border         — default border color for cards/tables/dividers
+#   text           — primary body text color
+#   muted_text     — secondary/caption text color
+#   white          — always #FFFFFF, kept for readability of the mapping
+PDF_THEMES = {
+    "Maroon Red": {
+        "layout": "classic",
+        "primary": "#9E1B1B", "primary_dark": "#7A1515",
+        "primary_light": "#C62828", "accent": "#C62828",
+        "pill_bg": "#FBECEC", "pill_border": "#E8DAD6", "pill_text": "#8F1C1C",
+        "bg_light": "#FCF8F6", "hotel_row_alt": "#FBF0F0", "border": "#E8DAD6",
+        "text": "#333333", "muted_text": "#444444", "white": "#FFFFFF",
+    },
+    "Modern Editorial": {
+        "layout": "editorial",
+        "primary": "#20242B", "primary_dark": "#0F1216",
+        "primary_light": "#3A404B", "accent": "#A8763B",
+        "pill_bg": "#FAFAF9", "pill_border": "#E5E7EB", "pill_text": "#20242B",
+        "bg_light": "#FAFAF9", "hotel_row_alt": "#F5F5F4", "border": "#E5E7EB",
+        "text": "#2B2B2B", "muted_text": "#6B7280", "white": "#FFFFFF",
+    },
+    "Modern Blue": {
+        "layout": "classic",
+        "primary": "#1A4D8F", "primary_dark": "#0F3466",
+        "primary_light": "#2E6FC4", "accent": "#2E6FC4",
+        "pill_bg": "#EAF1FB", "pill_border": "#D2E1F2", "pill_text": "#1A4D8F",
+        "bg_light": "#F6FAFE", "hotel_row_alt": "#EEF4FC", "border": "#D2E1F2",
+        "text": "#2B2B2B", "muted_text": "#4A4A4A", "white": "#FFFFFF",
+    },
+    "Emerald Green": {
+        "layout": "classic",
+        "primary": "#1B7A4A", "primary_dark": "#125A37",
+        "primary_light": "#2E9E63", "accent": "#2E9E63",
+        "pill_bg": "#E8F7EE", "pill_border": "#CFEBDA", "pill_text": "#1B7A4A",
+        "bg_light": "#F5FBF7", "hotel_row_alt": "#EAF8EF", "border": "#CFEBDA",
+        "text": "#2B2B2B", "muted_text": "#4A4A4A", "white": "#FFFFFF",
+    },
+    "Navy & Gold": {
+        "layout": "classic",
+        "primary": "#132A52", "primary_dark": "#0A1830",
+        "primary_light": "#24406E", "accent": "#B8912F",
+        "pill_bg": "#EFF2F8", "pill_border": "#DCE2EE", "pill_text": "#132A52",
+        "bg_light": "#F7F8FB", "hotel_row_alt": "#EDF0F6", "border": "#DCE2EE",
+        "text": "#242424", "muted_text": "#4A4A4A", "white": "#FFFFFF",
+    },
+    "Teal": {
+        "layout": "classic",
+        "primary": "#0F7A76", "primary_dark": "#0A5A57",
+        "primary_light": "#17A39D", "accent": "#17A39D",
+        "pill_bg": "#E7F6F5", "pill_border": "#CDEAE8", "pill_text": "#0F7A76",
+        "bg_light": "#F4FBFB", "hotel_row_alt": "#E9F7F6", "border": "#CDEAE8",
+        "text": "#2B2B2B", "muted_text": "#4A4A4A", "white": "#FFFFFF",
+    },
+    "Purple": {
+        "layout": "classic",
+        "primary": "#5B2A86", "primary_dark": "#3E1C5E",
+        "primary_light": "#7C4AAE", "accent": "#7C4AAE",
+        "pill_bg": "#F2ECF8", "pill_border": "#E1D3EF", "pill_text": "#5B2A86",
+        "bg_light": "#FAF8FC", "hotel_row_alt": "#F3EDF9", "border": "#E1D3EF",
+        "text": "#2B2B2B", "muted_text": "#4A4A4A", "white": "#FFFFFF",
+    },
+    "Minimal Black & White": {
+        "layout": "classic",
+        "primary": "#1A1A1A", "primary_dark": "#000000",
+        "primary_light": "#4D4D4D", "accent": "#4D4D4D",
+        "pill_bg": "#F2F2F2", "pill_border": "#DDDDDD", "pill_text": "#1A1A1A",
+        "bg_light": "#FAFAFA", "hotel_row_alt": "#F2F2F2", "border": "#DDDDDD",
+        "text": "#1A1A1A", "muted_text": "#555555", "white": "#FFFFFF",
+    },
+}
+DEFAULT_PDF_THEME = "Maroon Red"
+
 st.set_page_config(page_title="✈ Travel Itinerary Agent", page_icon="✈", layout="wide")
+
 
 # ── Session / history helpers ─────────────────────────────────────────────────
 
@@ -344,16 +445,32 @@ def _parse_markup(markup_raw: str, base_amount: float) -> float:
 
 
 
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    """Convert a '#RRGGBB' hex color to an 'rgba(r,g,b,a)' CSS string."""
+    h = (hex_color or "#000000").lstrip('#')
+    if len(h) != 6:
+        h = "000000"
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def generate_pdf(title: str, content: str, meta: dict,
-                 header_img_path: Path | None = None) -> bytes:
+                 header_img_path: Path | None = None,
+                 theme: dict | None = None) -> bytes:
     """
-    Render a fixed HTML/CSS travel itinerary template via WeasyPrint.
-    Design follows the Italy reference PDF exactly:
-    rounded cards, gradient hero, pill badges, green/pink/yellow sections.
+    Render the CLASSIC KukuTrip HTML/CSS travel itinerary template via
+    WeasyPrint: rounded cards, gradient hero, pill badges, day-number
+    tiles, price card, footer. This is the "classic" layout shared by
+    every color theme except "Modern Editorial" (which uses
+    generate_pdf_editorial() instead) — only the `theme` dict's colors
+    change between calls; the markup/structure never changes.
     Uses local DejaVu Sans fonts — no internet required.
     """
     import base64
     from weasyprint import HTML as WH
+
+    theme = theme or PDF_THEMES[DEFAULT_PDF_THEME]
+
 
     # ── Embed company logo (coollogo.png) ─────────────────────────────────────
     logo_tag = ""
@@ -375,8 +492,10 @@ def generate_pdf(title: str, content: str, meta: dict,
         )
     else:
         hero_bg = (
-            "linear-gradient(180deg,#4B275B 0%,#A63C55 45%,#E78A52 100%)"
+            f"linear-gradient(180deg,{theme['primary_dark']} 0%,"
+            f"{theme['primary']} 45%,{theme['primary_light']} 100%)"
         )
+
 
     pkg_name  = _h(meta.get("package_name", meta.get("destination", title)).upper())
     route_txt = _h(meta.get("route", ""))
@@ -659,13 +778,14 @@ body {{
     justify-content: center;
     padding: 6px 13px;
     border-radius: 999px;
-    background: #FBECEC;
-    border: 1px solid #E8DAD6;
-    color: #8F1C1C;
+    background: {theme['pill_bg']};
+    border: 1px solid {theme['pill_border']};
+    color: {theme['pill_text']};
     font-size: 10px;
     font-weight: bold;
     text-align: center;
 }}
+
 
 /* ── SECTION HEADINGS ─────────────────────────────────── */
 .section {{
@@ -674,7 +794,7 @@ body {{
 .section-title {{
     font-size: 17px;
     font-weight: bold;
-    color: #9E1B1B;
+    color: {theme['primary']};
     margin: 10px 0 7px 0;
     text-align: left;
 }}
@@ -683,8 +803,8 @@ body {{
 .day-card {{
     display: flex;
     width: 100%;
-    background: #FCF8F6;
-    border: 1px solid #E8DAD6;
+    background: {theme['bg_light']};
+    border: 1px solid {theme['border']};
     border-radius: 7px;
     overflow: hidden;
     margin-bottom: 7px;
@@ -694,8 +814,9 @@ body {{
 .day-num {{
     width: 52px;
     min-width: 52px;
-    background: #9E1B1B;
+    background: {theme['primary']};
     color: #FFFFFF;
+
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -721,7 +842,7 @@ body {{
 .day-title {{
     font-size: 13px;
     font-weight: bold;
-    color: #8F1C1C;
+    color: {theme['primary']};
     margin-bottom: 5px;
 }}
 .day-body ul {{
@@ -732,12 +853,12 @@ body {{
     font-size: 10.5px;
     line-height: 1.5;
     margin-bottom: 2px;
-    color: #333333;
+    color: {theme['text']};
 }}
 .overnight {{
     font-size: 10px;
     font-weight: bold;
-    color: #8F1C1C;
+    color: {theme['primary']};
     margin-top: 6px;
 }}
 
@@ -748,10 +869,10 @@ body {{
     border-spacing: 0;
     overflow: hidden;
     border-radius: 7px;
-    border: 1px solid #E8DAD6;
+    border: 1px solid {theme['border']};
 }}
 .hotel-table thead tr {{
-    background: #9E1B1B;
+    background: {theme['primary']};
 }}
 .hotel-table th {{
     padding: 8px 9px;
@@ -763,17 +884,18 @@ body {{
 .hotel-table td {{
     padding: 7px 9px;
     font-size: 10px;
-    color: #444444;
-    border-top: 1px solid #EDD8D8;
+    color: {theme['muted_text']};
+    border-top: 1px solid {theme['border']};
 }}
 .hotel-table tr:nth-child(even) td {{
-    background: #FBF0F0;
+    background: {theme['hotel_row_alt']};
 }}
 
 /* ── PRICE CARD ───────────────────────────────────────── */
 .price-card {{
-    background: linear-gradient(135deg,#9E1B1B,#C62828);
+    background: linear-gradient(135deg,{theme['primary']},{theme['primary_light']});
     color: #FFFFFF;
+
     border-radius: 7px;
     padding: 13px 20px;
     text-align: center;
@@ -902,8 +1024,9 @@ body {{
 
 /* ── CONTACT FOOTER ───────────────────────────────────── */
 .contact-footer {{
-    background: linear-gradient(135deg,#9E1B1B,#C62828);
+    background: linear-gradient(135deg,{theme['primary']},{theme['primary_light']});
     color: #FFFFFF;
+
     border-radius: 7px;
     padding: 11px 16px;
     text-align: center;
@@ -969,7 +1092,452 @@ body {{
     return buf.getvalue()
 
 
+def generate_pdf_editorial(title: str, meta: dict, theme: dict | None = None) -> bytes:
+    """
+    Render the "Modern Editorial" layout — a clean, document-style itinerary
+    inspired visually by the reference Georgia_Tbilisi_Grand_Explorer PDF:
+    compact trip-summary strip, a plain package-title block (no photo hero),
+    large typographic day numbers with a thin accent rule, a simple hotel
+    table, and restrained accent-color usage throughout. This is a
+    completely different visual system from generate_pdf()'s "classic"
+    layout, but it is driven by the EXACT SAME `meta` dict — no itinerary
+    content, hotel data, pricing, inclusions/exclusions, or notes differ
+    between layouts; only the presentation differs.
+
+    Uses local DejaVu Sans fonts — no internet required. No hero photo is
+    used in this layout (by design, matching the reference PDF).
+    """
+    import base64
+    from weasyprint import HTML as WH
+
+    theme = theme or PDF_THEMES["Modern Editorial"]
+
+    pkg_name   = _h(meta.get("package_name", meta.get("destination", title)).upper())
+    route_txt  = _h(meta.get("route", ""))
+    dates_txt  = _h(meta.get("dates", ""))
+    nights_txt = _h(meta.get("nights", ""))
+
+    # ── Compact trip-summary strip ──────────────────────────────────────────
+    summary_items = [
+        meta.get("dates", ""), meta.get("nights", ""),
+        meta.get("persons", ""), meta.get("transport", ""),
+    ]
+    summary_html = "".join(
+        f'<span class="sum-item">{_h(s)}</span>' for s in summary_items if s
+    )
+
+    # ── Final customer-facing price (same logic as classic layout) ─────────
+    final_label = meta.get("_final_price_label", "")
+    final_value = meta.get("_final_price_value", "")
+    if final_value:
+        price_label_text = final_label or "TOTAL PACKAGE COST"
+        amount_display = final_value
+    else:
+        nights_num = 0
+        try:
+            nights_num = int(re.search(r'(\d+)\s*[Nn]ight', meta.get("nights", "0")).group(1))
+        except Exception:
+            pass
+        persons_num = 1
+        try:
+            persons_num = max(1, int(re.search(r'(\d+)\s*[Aa]dult', meta.get("persons", "1")).group(1)))
+        except Exception:
+            pass
+        placeholder_amt = max(15000, nights_num * persons_num * 5000)
+        placeholder_amt = (placeholder_amt // 5000) * 5000
+        amount_display = f"INR {placeholder_amt:,}/- (approx.)"
+        price_label_text = "TOTAL PACKAGE COST"
+
+    # ── Day blocks — large typographic day number + thin accent rule ───────
+    days_html = ""
+    all_days = meta.get("days", [])
+    last_day_num = all_days[-1].get("day") if all_days else None
+    for day in all_days:
+        acts = "".join(f"<li>{_h(a)}</li>" for a in day.get("activities", []))
+        is_last = day.get("day") == last_day_num
+        overnight_city = day.get("overnight", "")
+        overnight = (f'<div class="ed-overnight">Overnight in {_h(overnight_city)}</div>'
+                     if overnight_city and not is_last else "")
+        day_date = _h(str(day.get('date', '')))
+        days_html += f"""
+        <div class="ed-day">
+          <div class="ed-day-num-col">
+            <div class="ed-day-num">{_h(str(day.get('day', '')).zfill(2))}</div>
+            <div class="ed-day-label">DAY {_h(str(day.get('day', '')))}</div>
+          </div>
+          <div class="ed-day-body">
+            <div class="ed-day-title">{_h(day.get('title', ''))}{f' <span class="ed-day-date">— {day_date}</span>' if day_date else ''}</div>
+            <ul>{acts}</ul>
+            {overnight}
+          </div>
+        </div>"""
+
+    # ── Hotel Details table ──────────────────────────────────────────────────
+    hotels_html = ""
+    if meta.get("hotels"):
+        rows = "".join(
+            f'<tr><td>{_h(h.get("city",""))}</td>'
+            f'<td>{_h(h.get("hotel",""))}</td>'
+            f'<td>{_h(h.get("dates",""))}</td></tr>'
+            for h in meta["hotels"]
+        )
+        hotels_html = f"""
+        <div class="ed-section">
+          <div class="ed-section-title">Hotel Details</div>
+          <table class="ed-table">
+            <thead><tr><th>City / Nights</th><th>Hotel Options</th><th>Dates</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </div>"""
+
+    # ── Highlights ────────────────────────────────────────────────────────
+    highlights_html = ""
+    if meta.get("highlights"):
+        items = "".join(f"<li>{_h(h)}</li>" for h in meta["highlights"])
+        highlights_html = f"""
+        <div class="ed-section">
+          <div class="ed-section-title">Package Highlights</div>
+          <ul class="ed-highlights">{items}</ul>
+        </div>"""
+
+    # ── Inclusions / Exclusions ──────────────────────────────────────────────
+    inc = meta.get("inclusions", [])
+    exc = meta.get("exclusions", [])
+    ie_html = ""
+    if inc or exc:
+        inc_items = "".join(f"<li>{_h(i)}</li>" for i in inc)
+        exc_items = "".join(f"<li>{_h(e)}</li>" for e in exc)
+        ie_html = f"""
+        <div class="ed-ie-row">
+          <div class="ed-inc">
+            <div class="ed-ie-title">&#10003; Inclusions</div>
+            <ul>{inc_items}</ul>
+          </div>
+          <div class="ed-exc">
+            <div class="ed-ie-title">&#10005; Exclusions</div>
+            <ul>{exc_items}</ul>
+          </div>
+        </div>"""
+
+    # ── Important Notes ──────────────────────────────────────────────────────
+    notes = meta.get("notes", [])
+    notes_html = ""
+    if notes:
+        items = "".join(f"<li>{_h(n)}</li>" for n in notes)
+        notes_html = f"""
+        <div class="ed-notes">
+          <div class="ed-notes-title">Important Notes</div>
+          <ul>{items}</ul>
+        </div>"""
+
+    # ── DejaVu font paths ──────────────────────────────────────────────────
+    dv_dir = "/usr/share/fonts/truetype/dejavu"
+    dv_regular = Path(f"{dv_dir}/DejaVuSans.ttf")
+    dv_bold    = Path(f"{dv_dir}/DejaVuSans-Bold.ttf")
+    font_face = ""
+    if dv_regular.exists() and dv_bold.exists():
+        r_b64 = base64.b64encode(dv_regular.read_bytes()).decode()
+        b_b64 = base64.b64encode(dv_bold.read_bytes()).decode()
+        font_face = f"""
+        @font-face {{ font-family: "DejaVuSans"; font-weight: normal;
+            src: url("data:font/truetype;base64,{r_b64}"); }}
+        @font-face {{ font-family: "DejaVuSans"; font-weight: bold;
+            src: url("data:font/truetype;base64,{b_b64}"); }}"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+{font_face}
+
+@page {{ size: A4; margin: 16mm 18mm; }}
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+    font-family: "DejaVuSans", Arial, sans-serif;
+    font-size: 10.5px;
+    color: {theme['text']};
+    background: #FFFFFF;
+}}
+
+/* ── PACKAGE TITLE BLOCK ─────────────────────────────────── */
+.ed-title {{
+    font-size: 22px;
+    font-weight: bold;
+    letter-spacing: 0.3px;
+    color: {theme['primary']};
+    text-transform: uppercase;
+    margin-bottom: 3px;
+}}
+.ed-route {{
+    font-size: 11px;
+    color: {theme['muted_text']};
+    margin-bottom: 3px;
+}}
+.ed-dates-line {{
+    font-size: 10.5px;
+    color: {theme['accent']};
+    font-weight: bold;
+    margin-bottom: 10px;
+}}
+.ed-rule {{
+    height: 2px;
+    background: {theme['accent']};
+    width: 46px;
+    margin-bottom: 12px;
+}}
+
+/* ── SUMMARY STRIP ────────────────────────────────────────── */
+.ed-summary {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    border-top: 1px solid {theme['border']};
+    border-bottom: 1px solid {theme['border']};
+    padding: 8px 0;
+    margin-bottom: 14px;
+}}
+.sum-item {{
+    font-size: 9.5px;
+    font-weight: bold;
+    color: {theme['text']};
+    padding: 0 12px;
+    border-right: 1px solid {theme['border']};
+}}
+.sum-item:last-child {{ border-right: none; }}
+
+/* ── PRICE ────────────────────────────────────────────────── */
+.ed-price {{
+    text-align: right;
+    margin-bottom: 16px;
+}}
+.ed-price-label {{
+    font-size: 8.5px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: {theme['muted_text']};
+}}
+.ed-price-val {{
+    font-size: 20px;
+    font-weight: bold;
+    color: {theme['accent']};
+}}
+
+/* ── SECTION HEADINGS ─────────────────────────────────────── */
+.ed-section {{ margin-bottom: 16px; }}
+.ed-section-title {{
+    font-size: 14px;
+    font-weight: bold;
+    color: {theme['primary']};
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding-bottom: 5px;
+    border-bottom: 1.5px solid {theme['accent']};
+    margin-bottom: 9px;
+}}
+
+/* ── HOTEL TABLE ──────────────────────────────────────────── */
+.ed-table {{
+    width: 100%;
+    border-collapse: collapse;
+}}
+.ed-table th {{
+    text-align: left;
+    font-size: 9.5px;
+    font-weight: bold;
+    color: #FFFFFF;
+    background: {theme['primary']};
+    padding: 7px 9px;
+}}
+.ed-table td {{
+    font-size: 9.5px;
+    color: {theme['text']};
+    padding: 6px 9px;
+    border-bottom: 1px solid {theme['border']};
+}}
+.ed-table tr:nth-child(even) td {{ background: {theme['hotel_row_alt']}; }}
+
+/* ── DAY-WISE ITINERARY ───────────────────────────────────── */
+.ed-day {{
+    display: flex;
+    gap: 14px;
+    padding: 12px 0;
+    border-bottom: 1px solid {theme['border']};
+    break-inside: avoid;
+    page-break-inside: avoid;
+}}
+.ed-day-num-col {{
+    width: 54px;
+    min-width: 54px;
+    text-align: center;
+}}
+.ed-day-num {{
+    font-size: 30px;
+    font-weight: bold;
+    line-height: 1;
+    color: {theme['accent']};
+}}
+.ed-day-label {{
+    font-size: 8px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    color: {theme['muted_text']};
+    margin-top: 2px;
+}}
+.ed-day-body {{ flex: 1; padding-top: 2px; }}
+.ed-day-title {{
+    font-size: 13px;
+    font-weight: bold;
+    color: {theme['primary']};
+    margin-bottom: 6px;
+}}
+.ed-day-date {{
+    font-size: 10px;
+    font-weight: normal;
+    color: {theme['muted_text']};
+}}
+.ed-day-body ul {{ padding-left: 14px; margin: 0; }}
+.ed-day-body li {{
+    font-size: 10px;
+    line-height: 1.55;
+    margin-bottom: 3px;
+    color: {theme['text']};
+}}
+.ed-overnight {{
+    font-size: 9.5px;
+    font-weight: bold;
+    color: {theme['accent']};
+    margin-top: 6px;
+}}
+
+/* ── HIGHLIGHTS ───────────────────────────────────────────── */
+.ed-highlights {{ padding-left: 16px; }}
+.ed-highlights li {{
+    font-size: 10px;
+    line-height: 1.6;
+    color: {theme['text']};
+    margin-bottom: 3px;
+}}
+
+/* ── INCLUSIONS / EXCLUSIONS ──────────────────────────────── */
+.ed-ie-row {{
+    display: flex;
+    gap: 16px;
+    break-inside: avoid;
+    page-break-inside: avoid;
+}}
+.ed-inc, .ed-exc {{ flex: 1; }}
+.ed-ie-title {{
+    font-size: 11.5px;
+    font-weight: bold;
+    color: {theme['primary']};
+    margin-bottom: 6px;
+}}
+.ed-inc ul, .ed-exc ul {{ padding-left: 14px; margin: 0; }}
+.ed-inc li, .ed-exc li {{
+    font-size: 9.5px;
+    line-height: 1.6;
+    color: {theme['text']};
+    margin-bottom: 3px;
+}}
+
+/* ── IMPORTANT NOTES ──────────────────────────────────────── */
+.ed-notes {{
+    margin-top: 6px;
+    padding-top: 10px;
+    border-top: 1px solid {theme['border']};
+    break-inside: avoid;
+    page-break-inside: avoid;
+}}
+.ed-notes-title {{
+    font-size: 11.5px;
+    font-weight: bold;
+    color: {theme['primary']};
+    margin-bottom: 6px;
+}}
+.ed-notes ul {{ padding-left: 14px; margin: 0; }}
+.ed-notes li {{
+    font-size: 9px;
+    line-height: 1.6;
+    color: {theme['muted_text']};
+    margin-bottom: 3px;
+}}
+
+/* ── FOOTER ───────────────────────────────────────────────── */
+.ed-footer {{
+    margin-top: 16px;
+    padding-top: 10px;
+    border-top: 2px solid {theme['primary']};
+    text-align: center;
+}}
+.ed-agent-name {{
+    font-size: 12px;
+    font-weight: bold;
+    color: {theme['primary']};
+    margin-bottom: 3px;
+}}
+.ed-contact {{
+    font-size: 9px;
+    color: {theme['muted_text']};
+}}
+</style>
+</head>
+<body>
+
+  <div class="ed-title">{pkg_name}</div>
+  {f'<div class="ed-route">{route_txt}</div>' if route_txt else ''}
+  {f'<div class="ed-dates-line">{dates_txt or nights_txt}{" | " + nights_txt if dates_txt and nights_txt else ""}</div>' if (dates_txt or nights_txt) else ''}
+  <div class="ed-rule"></div>
+
+  <div class="ed-summary">{summary_html}</div>
+
+  <div class="ed-price">
+    <div class="ed-price-label">{_h(price_label_text.upper())}</div>
+    <div class="ed-price-val">{_h(str(amount_display))}</div>
+  </div>
+
+  {hotels_html}
+
+  <div class="ed-section">
+    <div class="ed-section-title">Day-wise Itinerary</div>
+    {days_html}
+  </div>
+
+  {highlights_html}
+  {ie_html}
+  {notes_html}
+
+  <div class="ed-footer">
+    <div class="ed-agent-name">{_h(COMPANY_NAME)}</div>
+    <div class="ed-contact">{_h(COMPANY_PHONE)} &nbsp;·&nbsp; {_h(COMPANY_WEB)} &nbsp;·&nbsp; {_h(COMPANY_EMAIL)}</div>
+  </div>
+
+</body>
+</html>"""
+
+    buf = io.BytesIO()
+    WH(string=html).write_pdf(buf)
+    return buf.getvalue()
+
+
+def generate_pdf_themed(title: str, meta: dict, theme_name: str,
+                        header_img_path: Path | None = None) -> bytes:
+    """
+    Single entry point PDF generation dispatches to based on the selected
+    theme's declared layout — "classic" (generate_pdf, gradient hero photo)
+    or "editorial" (generate_pdf_editorial, document-style, no photo).
+    Callers should use this function rather than calling generate_pdf() or
+    generate_pdf_editorial() directly, so that adding a new theme with a
+    new layout only requires updating this dispatcher.
+    """
+    theme = PDF_THEMES.get(theme_name, PDF_THEMES[DEFAULT_PDF_THEME])
+    if theme.get("layout") == "editorial":
+        return generate_pdf_editorial(title, meta, theme=theme)
+    return generate_pdf(title, "", meta, header_img_path=header_img_path, theme=theme)
+
+
 # ── LLM-generated HTML → PDF ─────────────────────────────────────────────────
+
 
 def generate_html_pdf(meta: dict, api_key: str, model: str,
                       header_img_path: Path | None = None) -> bytes:
@@ -2111,7 +2679,30 @@ with st.sidebar:
     )
 
     st.divider()
+    st.subheader("🎨 PDF Settings")
+    pdf_theme_name = st.selectbox(
+        "PDF Theme",
+        list(PDF_THEMES.keys()),
+        index=list(PDF_THEMES.keys()).index(DEFAULT_PDF_THEME),
+        help="'Maroon Red' is the classic KukuTrip design. 'Modern Editorial' "
+             "uses a clean document-style layout with large day numbers. "
+             "All other themes reuse the classic layout with a different "
+             "color palette.",
+    )
+    _theme_preview = PDF_THEMES[pdf_theme_name]
+    st.markdown(
+        f"<div style='display:flex;gap:6px;align-items:center;margin-top:-6px;'>"
+        f"<span style='width:14px;height:14px;border-radius:50%;background:{_theme_preview['primary']};display:inline-block;border:1px solid #ccc;'></span>"
+        f"<span style='width:14px;height:14px;border-radius:50%;background:{_theme_preview['accent']};display:inline-block;border:1px solid #ccc;'></span>"
+        f"<span style='width:14px;height:14px;border-radius:50%;background:{_theme_preview['bg_light']};display:inline-block;border:1px solid #ccc;'></span>"
+        f"<span style='font-size:11px;color:#777;'>Primary · Accent · Background</span></div>",
+        unsafe_allow_html=True,
+    )
+    st.session_state["pdf_theme_name"] = pdf_theme_name
+
+    st.divider()
     st.subheader("📂 Travel Documents")
+
     uploaded = st.file_uploader("Upload PDF or Word files", type=["pdf", "docx"], accept_multiple_files=True)
     if uploaded:
         DOCS_DIR.mkdir(exist_ok=True)
@@ -2479,8 +3070,13 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                         if fallback_kw.lower() != img_kw.lower():
                             hdr_img = fetch_destination_image(fallback_kw, _dbg=_img_dbg)
                     st.session_state["_img_dbg_msgs"] = _img_dbg  # persist across rerun
-                    pdf_b = generate_pdf(pkg_label, "", meta_for_pdf, header_img_path=hdr_img)
+                    selected_theme_name = st.session_state.get("pdf_theme_name", DEFAULT_PDF_THEME)
+                    pdf_b = generate_pdf_themed(
+                        pkg_label, meta_for_pdf, selected_theme_name,
+                        header_img_path=hdr_img,
+                    )
                     pdf_n = f"itinerary_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+
                     # Save PDF to template dir
                     TEMPLATE_DIR.mkdir(exist_ok=True)
                     (TEMPLATE_DIR / pdf_n).write_bytes(pdf_b)
