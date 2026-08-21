@@ -1241,6 +1241,16 @@ def extract_all_inclusion_exclusion_tables(docs_dir: Path) -> str:
         r'No\.?\s*of\s*Pax|Destination)\s*[:\-]', re.I
     )
 
+    # Internal/agent-facing line items that must NEVER appear in the
+    # customer-facing PDF's Exclusions list. These describe agent-to-vendor
+    # banking/remittance charges, not something the traveller is exposed to.
+    excluded_line_patterns = [
+        re.compile(r'transactional\s+charges.*remitting.*recovered\s+from\s+the\s+agent', re.I),
+    ]
+
+    def _is_suppressed(line: str) -> bool:
+        return any(p.search(line) for p in excluded_line_patterns)
+
     blocks = []
     for f in sorted(Path(docs_dir).glob("*.docx")):
         try:
@@ -1274,14 +1284,15 @@ def extract_all_inclusion_exclusion_tables(docs_dir: Path) -> str:
                         inc_items += [
                             ln.strip(" \u00a0\u2022-")
                             for ln in cells[0].text.replace("\u00a0", " ").split("\n")
-                            if ln.strip(" \u00a0\u2022-")
+                            if ln.strip(" \u00a0\u2022-") and not _is_suppressed(ln)
                         ]
                         exc_items += [
                             ln.strip(" \u00a0\u2022-")
                             for ln in cells[1].text.replace("\u00a0", " ").split("\n")
-                            if ln.strip(" \u00a0\u2022-")
+                            if ln.strip(" \u00a0\u2022-") and not _is_suppressed(ln)
                         ]
                 if (inc_items or exc_items) and current_heading:
+
                     block = (
                         f"### INCLUSIONS & EXCLUSIONS — Package: {current_heading} "
                         f"(source: {f.name})\n"
