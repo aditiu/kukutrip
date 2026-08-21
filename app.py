@@ -1469,7 +1469,174 @@ def extract_all_important_notes(docs_dir: Path) -> str:
     return "\n\n".join(blocks)
 
 
+def extract_all_daywise_itinerary(docs_dir: Path) -> str:
+    """
+    Extract EVERY day-by-day itinerary block from every DOCX in docs_dir,
+    tagged with its package heading, and return them concatenated as a
+    single authoritative block — preserving route/distance segments in
+    full and flagging optional/"upon request" activities SEPARATELY from
+    guaranteed ones.
+
+    WHY THIS EXISTS: same class of problem as price tables, hotel options,
+    and important notes. A single day's itinerary content spans several
+    consecutive paragraphs (a "Day N: <title>" heading, one or more
+    route/distance parentheticals like "(Tbilisi – Gudauri: Distance: 120
+    kms. / Driving Time: 2 hrs. 20 mins)", a long prose description, and an
+    "Overnight in <city>" line) that must all be kept together AND
+    correctly attributed to the right package. Chunk-based semantic
+    retrieval frequently:
+      - splits a day's route/distance segments away from its heading or
+        drops them from the retrieved context entirely,
+      - truncates or fragments the prose description, causing the LLM to
+        compress a detailed multi-sentence day into a single generic
+        bullet, and
+      - fails to recognise an "upon request" / optional activity when the
+        qualifying phrase ends up in a different chunk than the activity
+        name, causing optional add-ons to be presented as guaranteed
+        inclusions.
+
+    FIX: bypass retrieval entirely for the day-wise itinerary. Walk each
+    document in reading order; for every package heading, collect each
+    "Day N: <title>" block verbatim — route/distance lines kept as their
+    own list, the narrative split into sentences, and any sentence
+    containing an optional/upon-request keyword pulled into a separate
+    "Optional Activities Mentioned" list — up to the next Day heading,
+    package heading, or a stop marker (pricing/accommodation/vehicle/
+    inclusions/notes headings, or a table).
+    """
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+
+    package_heading_re = re.compile(r'^\s*\d+\s*Nights?\b', re.I)
+    day_re = re.compile(r'^\s*Day\s*(\d+)\s*[:\-]\s*(.*)$', re.I)
+    overnight_re = re.compile(r'^\s*Overnight\s+in\s+(.+)$', re.I)
+    route_re = re.compile(
+        r'.*?(?:distance|driving\s*time|\bkms?\.?\b).*', re.I
+    )
+    stop_markers_re = re.compile(
+        r'^\s*(Rates\s+in|INDEX|Accommodation\s+Details|Inclusions\s*&?\s*'
+        r'Exclusions|Important\s*Notes|Vehicle\s+Details)', re.I
+    )
+    optional_kw_re = re.compile(
+        r'upon\s+request|optional(?:\s+activity)?|available\s+on\s+request|'
+        r'at\s+extra\s+cost|if\s+required|subject\s+to\s+availability|'
+        r'can\s+be\s+added', re.I
+    )
+
+    def _split_optional_sentences(text: str) -> tuple[list, list]:
+        """Split narrative into (regular_sentences, optional_sentences)
+        based on presence of optional-activity keywords in each sentence."""
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        regular, optional = [], []
+        for s in sentences:
+            s = s.strip()
+            if not s:
+                continue
+            if optional_kw_re.search(s):
+                optional.append(s)
+            else:
+                regular.append(s)
+        return regular, optional
+
+    blocks = []
+    for f in sorted(Path(docs_dir).glob("*.docx")):
+        try:
+            doc = Document(f)
+        except Exception:
+            continue
+        body = doc.element.body
+        current_heading = ""
+        current_day_num = None
+        current_day_title = ""
+        route_segments: list = []
+        narrative_lines: list = []
+        overnight_city = ""
+        package_days: list = []
+
+        def _flush_day():
+            nonlocal current_day_num, current_day_title, route_segments
+            nonlocal narrative_lines, overnight_city
+            if current_day_num is None:
+                return
+            narrative = " ".join(narrative_lines).strip()
+            regular, optional = _split_optional_sentences(narrative)
+            day_block = [f"Day {current_day_num}: {current_day_title}"]
+            if route_segments:
+                day_block.append("  Route Segments:")
+                for seg in route_segments:
+                    day_block.append(f"    - {seg}")
+            if regular:
+                day_block.append("  Description:")
+                for s in regular:
+                    day_block.append(f"    {s}")
+            if optional:
+                day_block.append("  Optional Activities Mentioned (NOT guaranteed inclusions):")
+                for s in optional:
+                    day_block.append(f"    - {s}")
+            if overnight_city:
+                day_block.append(f"  Overnight: {overnight_city}")
+            package_days.append("\n".join(day_block))
+            current_day_num, current_day_title = None, ""
+            route_segments, narrative_lines, overnight_city = [], [], ""
+
+        def _flush_package():
+            nonlocal package_days, current_heading
+            _flush_day()
+            if package_days and current_heading:
+                blocks.append(
+                    f"### DAY-WISE ITINERARY — Package: {current_heading} "
+                    f"(source: {f.name})\n" + "\n\n".join(package_days)
+                )
+            package_days = []
+
+        for child in body.iterchildren():
+            if child.tag == qn('w:p'):
+                p = Paragraph(child, doc)
+                text = p.text.strip()
+                if not text:
+                    continue
+
+                if package_heading_re.match(text) and len(text) < 120:
+                    _flush_package()
+                    current_heading = text
+                    continue
+
+                day_m = day_re.match(text)
+                if day_m:
+                    _flush_day()
+                    current_day_num = day_m.group(1)
+                    current_day_title = day_m.group(2).strip()
+                    continue
+
+                if stop_markers_re.match(text):
+                    _flush_day()
+                    continue
+
+                if current_day_num is not None:
+                    ov_m = overnight_re.match(text)
+                    if ov_m:
+                        overnight_city = ov_m.group(1).strip()
+                        continue
+                    if route_re.match(text) and len(text) < 150:
+                        route_segments.append(text.strip('() '))
+                        continue
+                    narrative_lines.append(text)
+
+            elif child.tag == qn('w:tbl'):
+                # A table always ends the current day — in this document
+                # pricing/hotel/vehicle/inclusions tables always follow the
+                # day-wise narrative, never interrupt it.
+                _flush_day()
+
+        _flush_package()  # flush the final package block in this file
+
+    return "\n\n".join(blocks)
+
+
 # ── Vector store ──────────────────────────────────────────────────────────────
+
 
 
 
@@ -1642,9 +1809,38 @@ def get_answer(col, question: str, history: list, api_key: str, model: str) -> t
             + notes_block
         )
 
+    # ── Always inject the COMPLETE, authoritative day-wise itinerary ────────
+    # Semantic retrieval is especially unreliable for the day-wise narrative:
+    # each day's route/distance segments, long prose description, and any
+    # "upon request"/optional activity phrase must stay together AND be
+    # correctly attributed to the right package — but with 6 near-identical
+    # multi-day itineraries in one document, chunking frequently splits a
+    # day's route segments away from its description, truncates the prose
+    # into an over-short bullet, or loses the distinction between a
+    # guaranteed and an "upon request" activity. Bypass retrieval and inject
+    # the full, correctly-labeled, sentence-preserving day-wise breakdown
+    # directly, per package.
+    daywise_block = extract_all_daywise_itinerary(DOCS_DIR)
+    if daywise_block:
+        context += (
+            "\n\n## AUTHORITATIVE DAY-WISE ITINERARY (use these EXACTLY — "
+            "do not shorten or paraphrase the Description sentences into a "
+            "single generic bullet; preserve every Route Segment (distance/ "
+            "driving time) as its own bullet; each block is labeled with its "
+            "exact package name — match the package name precisely, then "
+            "use ALL of that package's Route Segments and Description "
+            "sentences as separate 'activities' array items for that day; "
+            "items listed under 'Optional Activities Mentioned' are NOT "
+            "guaranteed inclusions — mark them clearly as optional/upon "
+            "request in the day's activities, never present them as if "
+            "already included)\n"
+            + daywise_block
+        )
+
 
 
     history_text = "".join(
+
 
         f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}\n"
         for m in history[-6:]
@@ -1716,6 +1912,23 @@ def get_answer(col, question: str, history: list, api_key: str, model: str) -> t
         '  "notes": ["Only applicable notes"],\n'
         '  "amount": "Price from KB e.g. INR 1,45,000 per person — omit if not in KB"\n'
         "}\n\n"
+
+        "## DAY-WISE ITINERARY DETAIL REQUIREMENT (MANDATORY)\n"
+        "Each day's 'activities' array MUST preserve the full descriptive detail from the "
+        "source material — never compress a day into a single short sentence such as "
+        "'Visit Uplistsikhe and Borjomi.' Instead:\n"
+        "  - Every Route Segment (distance/driving time) from the AUTHORITATIVE DAY-WISE "
+        "ITINERARY block below must appear as its own activities-array item, e.g. "
+        "'Tbilisi → Uplistsikhe: 80 km / 1.5 hrs'.\n"
+        "  - Every Description sentence must appear as its own activities-array item — do "
+        "not merge multiple sentences into one bullet, and do not drop descriptive details "
+        "(names of monuments, historical context, what the traveller does at each stop).\n"
+        "  - Any item under 'Optional Activities Mentioned' must appear in the activities "
+        "array clearly prefixed as optional, e.g. 'Optional (upon request): Wine tasting at "
+        "KTW Winery' — never present it as if it were a guaranteed inclusion, and never "
+        "omit it from the itinerary either.\n"
+        "  - Preserve the 'Overnight' city exactly as given in the source block.\n\n"
+
 
         "## PAX / PERSON / ADULT NORMALIZATION\n"
         "The terms Pax, PAX, Person, Persons, People, Adult, Adults, 'No. of Pax', 'No. of Persons', "
