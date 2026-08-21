@@ -1303,7 +1303,174 @@ def extract_all_inclusion_exclusion_tables(docs_dir: Path) -> str:
     return "\n\n".join(blocks)
 
 
+def extract_all_hotel_tables(docs_dir: Path) -> str:
+    """
+    Extract EVERY "Accommodation Details" (hotel options per city/category)
+    table from every DOCX in docs_dir, tagged with its package heading, and
+    return them concatenated as a single authoritative block.
+
+    WHY THIS EXISTS: same rationale as price tables and inclusions/exclusions
+    — every package variant has its OWN accommodation table (same header row
+    "Destination | 5 Star | 4 Star – (D) | ... | 3 Star", differing only in
+    which cities are listed and which hotel names appear in the 3-Star / 4-
+    Star / 5-Star cells for each city). Semantic retrieval cannot reliably
+    keep these straight across 6 nearly-identical tables, so bypass retrieval
+    entirely and inject the correctly-labeled table for every package.
+    """
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+
+    heading_re = re.compile(r'\bNights?\b|\bDays?\b', re.I)
+    day_re = re.compile(r'^\s*Day\s*\d+\s*:', re.I)
+    non_title_re = re.compile(
+        r'^\s*(Duration|Validity|Cities|Rates|Accommodation|Supplement|'
+        r'No\.?\s*of\s*Pax|Destination)\s*[:\-]', re.I
+    )
+    # Accommodation table's header row starts with "Destination" and lists
+    # star categories — distinct from the pricing table (which starts with
+    # "No of Pax") even though both use similar category-name columns.
+    hotel_header_re = re.compile(r'Destination', re.I)
+
+    blocks = []
+    for f in sorted(Path(docs_dir).glob("*.docx")):
+        try:
+            doc = Document(f)
+        except Exception:
+            continue
+        body = doc.element.body
+        current_heading = ""
+        for child in body.iterchildren():
+            if child.tag == qn('w:p'):
+                p = Paragraph(child, doc)
+                text = p.text.strip()
+                if not text:
+                    continue
+                if (heading_re.search(text) and not day_re.match(text)
+                        and not non_title_re.match(text) and len(text) < 120):
+                    current_heading = text
+            elif child.tag == qn('w:tbl'):
+                table = Table(child, doc)
+                if not table.rows:
+                    continue
+                headers = [c.text.strip() for c in table.rows[0].cells]
+                if not headers or not hotel_header_re.search(headers[0]):
+                    continue  # not the accommodation table
+                rows_text = []
+                for row in table.rows[1:]:
+                    cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+                    if not any(cells):
+                        continue
+                    row_text = " | ".join(
+                        f"{h}: {v}" for h, v in zip(headers, cells) if v
+                    )
+                    rows_text.append(row_text)
+                if rows_text and current_heading:
+                    blocks.append(
+                        f"### HOTEL OPTIONS — Package: {current_heading} (source: {f.name})\n"
+                        + "\n".join(rows_text)
+                    )
+    return "\n\n".join(blocks)
+
+
+def extract_all_important_notes(docs_dir: Path) -> str:
+    """
+    Extract EVERY "Important Notes:" free-text block from every DOCX in
+    docs_dir, tagged with its package heading, and return them concatenated
+    as a single authoritative block.
+
+    WHY THIS EXISTS: "Important Notes" is free-flowing paragraph text (not a
+    table), placed immediately after each package's Inclusions/Exclusions
+    table. Because it is plain text rather than a distinctly-labeled table,
+    the previous approach relied entirely on semantic chunk retrieval to
+    surface it — which is unreliable across 6 near-identical packages and
+    frequently caused these notes to be dropped from the generated PDF
+    entirely. Bypass retrieval: walk the document in reading order, capture
+    every paragraph following an "Important Notes" heading up to the next
+    package heading (or an "INDEX" marker, or a table), and tag it with the
+    current package.
+    """
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+
+    # NOTE: unlike other extractors in this file, we CANNOT use the loose
+    # `heading_re = r'\bNights?\b|\bDays?\b'` pattern here. That pattern
+    # matches "Nights"/"Days" ANYWHERE in the text, including as an ordinary
+    # word inside an Important Notes sentence — e.g. "Separate guide service
+    # if required per day 60 $..." contains "day" and would be misdetected
+    # as a new package heading, causing an immediate/empty flush of the
+    # notes before any lines are captured (this was the root cause of
+    # "Important Notes" silently disappearing for every package). Instead,
+    # require the line to actually START with a number followed by
+    # "Night(s)" — the real pattern every package title uses in this
+    # document (e.g. "4 Nights Tbilisi", "6 Nights - 4 Nights Tbilisi + 2
+    # Nights Batumi") — which free-text note sentences never do.
+    package_heading_re = re.compile(r'^\s*\d+\s*Nights?\b', re.I)
+    notes_heading_re = re.compile(r'^\s*Important\s*Notes\s*:?\s*$', re.I)
+    stop_re = re.compile(r'^\s*INDEX\s*$', re.I)
+
+
+    blocks = []
+    for f in sorted(Path(docs_dir).glob("*.docx")):
+        try:
+            doc = Document(f)
+        except Exception:
+            continue
+        body = doc.element.body
+        current_heading = ""
+        in_notes = False
+        note_lines: list[str] = []
+
+        def _flush():
+            nonlocal note_lines, current_heading
+            if note_lines and current_heading:
+                blocks.append(
+                    f"### IMPORTANT NOTES — Package: {current_heading} (source: {f.name})\n"
+                    + "\n".join(f"- {n}" for n in note_lines)
+                )
+            note_lines = []
+
+        for child in body.iterchildren():
+            if child.tag == qn('w:p'):
+                p = Paragraph(child, doc)
+                text = p.text.strip()
+                if not text:
+                    continue
+                if notes_heading_re.match(text):
+                    in_notes = True
+                    continue
+                if package_heading_re.match(text) and len(text) < 120:
+                    # A new package heading ends the current notes block
+                    if in_notes:
+                        _flush()
+                        in_notes = False
+                    current_heading = text
+                    continue
+                if stop_re.match(text):
+                    if in_notes:
+                        _flush()
+                        in_notes = False
+                    continue
+                if in_notes:
+                    note_lines.append(text)
+
+            elif child.tag == qn('w:tbl'):
+                # A table ends the current notes block (notes are plain
+                # paragraphs only, positioned between the inclusions table
+                # and the next package heading)
+                if in_notes:
+                    _flush()
+                    in_notes = False
+        if in_notes:
+            _flush()
+    return "\n\n".join(blocks)
+
+
 # ── Vector store ──────────────────────────────────────────────────────────────
+
 
 
 
@@ -1441,9 +1608,44 @@ def get_answer(col, question: str, history: list, api_key: str, model: str) -> t
             + incl_excl_block
         )
 
+    # ── Always inject the COMPLETE, authoritative hotel options ─────────────
+    # Same rationale as price tables and inclusions/exclusions: each
+    # package's accommodation table lists city-specific hotel options per
+    # star category, but the table structure/wording is nearly identical
+    # across packages (differing mainly in which cities appear). Bypass
+    # retrieval and inject the full, correctly-labeled set directly.
+    hotel_tables_block = extract_all_hotel_tables(DOCS_DIR)
+    if hotel_tables_block:
+        context += (
+            "\n\n## AUTHORITATIVE HOTEL OPTIONS (use these EXACTLY — "
+            "do not use hotel names found elsewhere in the context above; "
+            "each table is labeled with its exact package name — match the "
+            "package name precisely, then pick the hotel option(s) for the "
+            "correct destination/city and the user's requested star "
+            "category from that table)\n"
+            + hotel_tables_block
+        )
+
+    # ── Always inject the COMPLETE, authoritative Important Notes ──────────
+    # "Important Notes" is free-text (not a table) and was previously left
+    # to unreliable semantic retrieval, causing it to be dropped entirely
+    # from many generated itineraries. Bypass retrieval and inject the full,
+    # correctly-labeled set directly, per package.
+    notes_block = extract_all_important_notes(DOCS_DIR)
+    if notes_block:
+        context += (
+            "\n\n## AUTHORITATIVE IMPORTANT NOTES (use these EXACTLY — "
+            "do not use notes found elsewhere in the context above; each "
+            "block is labeled with its exact package name — match the "
+            "package name precisely before copying its notes verbatim into "
+            "the JSON 'notes' array)\n"
+            + notes_block
+        )
+
 
 
     history_text = "".join(
+
         f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}\n"
         for m in history[-6:]
     )
@@ -1610,8 +1812,25 @@ def get_answer(col, question: str, history: list, api_key: str, model: str) -> t
         "matching package by nights/cities and adapt only the accommodation-night lines to "
         "reflect the actual itinerary, keeping all other generic inclusions/exclusions intact.\n\n"
 
+        "## HOTEL OPTIONS SELECTION — PACKAGE-EXACT MATCH (MANDATORY)\n"
+        "The '## AUTHORITATIVE HOTEL OPTIONS' section below contains a SEPARATE hotel-options "
+        "table for EVERY package variant in the knowledge base. Match the exact package heading "
+        "(same rule as inclusions/exclusions above) before reading hotel names for any city — "
+        "then pick the hotel(s) listed for that destination + the user's confirmed star category, "
+        "copying the exact hotel names/'or similar' wording verbatim. Do not borrow a hotel name "
+        "from a different package's table even if the city name is the same.\n\n"
+
+        "## IMPORTANT NOTES SELECTION — PACKAGE-EXACT MATCH (MANDATORY)\n"
+        "The '## AUTHORITATIVE IMPORTANT NOTES' section below contains a SEPARATE Important "
+        "Notes block for EVERY package variant in the knowledge base. Match the exact package "
+        "heading (same rule as inclusions/exclusions above), then copy that package's notes "
+        "verbatim into the JSON 'notes' array — every note in that block must be included; do "
+        "not omit, shorten, or merge notes from a different package. The 'notes' array must "
+        "never be empty when a matching package's Important Notes block exists in the "
+        "knowledge base.\n\n"
 
         f"## KNOWLEDGE BASE\n{context}\n\n"
+
         f"## CONVERSATION HISTORY\n{history_text}"
     )
 
