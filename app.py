@@ -1352,7 +1352,16 @@ def call_gemini(api_key: str, model: str, system: str, user: str) -> str:
     payload = {
         "system_instruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": user}]}],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 4096}
+        # NOTE: maxOutputTokens must be generous enough to fit the FULL JSON
+        # itinerary — including the verbatim, per-package inclusions/exclusions
+        # (now up to ~20 items each, per extract_all_inclusion_exclusion_tables)
+        # PLUS the day-wise itinerary, hotels, highlights, notes, and amount
+        # fields that come after inclusions/exclusions in the JSON schema.
+        # A too-small limit here silently truncates the JSON near the end
+        # (notes/amount), which then disappears from the generated PDF
+        # even though earlier sections still render correctly.
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 8192}
+
     }
     resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"},
                          params={"key": api_key}, proxies=proxies, timeout=90)
