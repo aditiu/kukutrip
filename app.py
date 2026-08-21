@@ -401,6 +401,36 @@ def _extract_persons_count(persons_str: str) -> int:
     return 1
 
 
+def _format_nights_days(nights_str: str, days_list=None) -> str:
+    """Normalize any nights/days representation into 'N Nights / N Days'.
+    Handles bare numbers ('9'), 'N Nights' only, 'N Days' only, or an
+    already-correct 'N Nights / N Days' string. Falls back to counting
+    the days[] array length when no days count can be derived otherwise."""
+    import re as _re
+    s = str(nights_str or "").strip()
+    if not s:
+        if days_list:
+            d = len(days_list)
+            if d > 0:
+                return f"{max(0, d-1)} Nights / {d} Days"
+        return ""
+    m_n = _re.search(r'(\d+)\s*[Nn]ight', s)
+    m_d = _re.search(r'(\d+)\s*[Dd]ay', s)
+    if m_n and m_d:
+        return f"{m_n.group(1)} Nights / {m_d.group(1)} Days"
+    if m_n:
+        n = int(m_n.group(1))
+        return f"{n} Nights / {n+1} Days"
+    if m_d:
+        d = int(m_d.group(1))
+        return f"{max(0, d-1)} Nights / {d} Days"
+    m_bare = _re.search(r'^(\d+)$', s)
+    if m_bare:
+        n = int(m_bare.group(1))
+        return f"{n} Nights / {n+1} Days"
+    return s
+
+
 def _is_usd_amount(amount_str: str) -> bool:
     """Detect whether a price string is denominated in USD."""
     return bool(re.search(r'USD|US\$|\$', str(amount_str or ""), re.I))
@@ -500,14 +530,14 @@ def generate_pdf(title: str, content: str, meta: dict,
     pkg_name  = _h(meta.get("package_name", meta.get("destination", title)).upper())
     route_txt = _h(meta.get("route", ""))
     dates_txt = _h(meta.get("dates", ""))
-    nights_txt = _h(meta.get("nights", ""))
+    nights_txt = _h(_format_nights_days(meta.get("nights", ""), meta.get("days")))
 
     # ── Hero dates line: prefer dates, else show nights ────────────────────────
     hero_dates = dates_txt or nights_txt
 
     # ── Metadata pills — centered group ───────────────────────────────────────
     pill_items = [
-        meta.get("dates", ""), meta.get("nights", ""),
+        meta.get("dates", ""), _format_nights_days(meta.get("nights", ""), meta.get("days")),
         meta.get("persons", ""), meta.get("transport", ""),
     ]
     pills_html = "".join(
@@ -1115,11 +1145,11 @@ def generate_pdf_editorial(title: str, meta: dict, theme: dict | None = None) ->
     pkg_name   = _h(meta.get("package_name", meta.get("destination", title)).upper())
     route_txt  = _h(meta.get("route", ""))
     dates_txt  = _h(meta.get("dates", ""))
-    nights_txt = _h(meta.get("nights", ""))
+    nights_txt = _h(_format_nights_days(meta.get("nights", ""), meta.get("days")))
 
     # ── Compact trip-summary strip ──────────────────────────────────────────
     summary_items = [
-        meta.get("dates", ""), meta.get("nights", ""),
+        meta.get("dates", ""), _format_nights_days(meta.get("nights", ""), meta.get("days")),
         meta.get("persons", ""), meta.get("transport", ""),
     ]
     summary_html = "".join(
@@ -2713,6 +2743,7 @@ def _normalize_pdf_meta(meta):
     out["days"] = nd
     for k in ("hotels", "highlights", "inclusions", "exclusions", "notes"):
         out[k] = [x for x in (out.get(k) or []) if x]
+    out["nights"] = _format_nights_days(out.get("nights", ""), out.get("days"))
     if not out.get("package_name"):
         out["package_name"] = out.get("destination") or "Travel Itinerary"
     return out
