@@ -1206,7 +1206,94 @@ def extract_all_price_tables(docs_dir: Path) -> str:
     return "\n\n".join(blocks)
 
 
+def extract_all_inclusion_exclusion_tables(docs_dir: Path) -> str:
+    """
+    Extract EVERY Inclusions/Exclusions table from every DOCX in docs_dir,
+    tagged with its package heading, and return them concatenated as a
+    single authoritative block.
+
+    WHY THIS EXISTS: exactly the same problem as extract_all_price_tables —
+    each package (e.g. "5 Nights - 4 Nights Tbilisi + 1 Night Gudauri" vs
+    "6 Nights - 4 Nights Tbilisi + 2 Nights Batumi") has its OWN two-column
+    "Inclusions | Exclusions" table with nights/city-specific line items
+    (e.g. "3 Nights' accommodation in Tbilisi", "1 Night accommodation in
+    Gudauri"), but the wording overlaps heavily across packages ("Daily
+    Breakfast", "Round Airport Transfers", "Tips for guide and driver" appear
+    almost everywhere). Semantic similarity search cannot reliably tell which
+    package's table a retrieved chunk belongs to, so it can quote the wrong
+    package's night-by-night accommodation breakdown.
+
+    FIX: bypass retrieval for inclusions/exclusions entirely. Extract the
+    complete, correctly-labeled table for every package directly from the
+    source documents (matching each table to the most recent package
+    heading, exactly like price tables) and inject the full block into every
+    LLM call's context.
+    """
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+
+    heading_re = re.compile(r'\bNights?\b|\bDays?\b', re.I)
+    day_re = re.compile(r'^\s*Day\s*\d+\s*:', re.I)
+    non_title_re = re.compile(
+        r'^\s*(Duration|Validity|Cities|Rates|Accommodation|Supplement|'
+        r'No\.?\s*of\s*Pax|Destination)\s*[:\-]', re.I
+    )
+
+    blocks = []
+    for f in sorted(Path(docs_dir).glob("*.docx")):
+        try:
+            doc = Document(f)
+        except Exception:
+            continue
+        body = doc.element.body
+        current_heading = ""
+        for child in body.iterchildren():
+            if child.tag == qn('w:p'):
+                p = Paragraph(child, doc)
+                text = p.text.strip()
+                if not text:
+                    continue
+                if (heading_re.search(text) and not day_re.match(text)
+                        and not non_title_re.match(text) and len(text) < 120):
+                    current_heading = text
+            elif child.tag == qn('w:tbl'):
+                table = Table(child, doc)
+                if not table.rows:
+                    continue
+                headers = [c.text.strip() for c in table.rows[0].cells]
+                header_line = " ".join(headers).lower()
+                # Only the 2-column "Inclusions | Exclusions" table
+                if "inclusion" not in header_line or "exclusion" not in header_line:
+                    continue
+                inc_items, exc_items = [], []
+                for row in table.rows[1:]:
+                    cells = row.cells
+                    if len(cells) >= 2:
+                        inc_items += [
+                            ln.strip(" \u00a0\u2022-")
+                            for ln in cells[0].text.replace("\u00a0", " ").split("\n")
+                            if ln.strip(" \u00a0\u2022-")
+                        ]
+                        exc_items += [
+                            ln.strip(" \u00a0\u2022-")
+                            for ln in cells[1].text.replace("\u00a0", " ").split("\n")
+                            if ln.strip(" \u00a0\u2022-")
+                        ]
+                if (inc_items or exc_items) and current_heading:
+                    block = (
+                        f"### INCLUSIONS & EXCLUSIONS — Package: {current_heading} "
+                        f"(source: {f.name})\n"
+                        "Inclusions:\n" + "\n".join(f"- {i}" for i in inc_items) + "\n"
+                        "Exclusions:\n" + "\n".join(f"- {e}" for e in exc_items)
+                    )
+                    blocks.append(block)
+    return "\n\n".join(blocks)
+
+
 # ── Vector store ──────────────────────────────────────────────────────────────
+
 
 
 @st.cache_resource(show_spinner="Building document index…")
@@ -1310,6 +1397,30 @@ def get_answer(col, question: str, history: list, api_key: str, model: str) -> t
             "package name precisely before using its rates)\n"
             + price_tables_block
         )
+
+    # ── Always inject the COMPLETE, authoritative inclusions/exclusions ─────
+    # Same rationale as price tables: each package's nights/city-specific
+    # inclusion & exclusion list (e.g. "3 Nights' accommodation in Tbilisi",
+    # "1 Night accommodation in Gudauri") is easily confused with a
+    # different package's list by semantic retrieval, since the wording
+    # overlaps heavily ("Daily Breakfast", "Round Airport Transfers", etc.
+    # appear in nearly every package). Bypass retrieval and inject the full,
+    # correctly-labeled set directly so the model always matches the exact
+    # package name before using its inclusions/exclusions.
+    incl_excl_block = extract_all_inclusion_exclusion_tables(DOCS_DIR)
+    if incl_excl_block:
+        context += (
+            "\n\n## AUTHORITATIVE INCLUSIONS & EXCLUSIONS (use these EXACTLY — "
+            "do not use inclusion/exclusion items found elsewhere in the context "
+            "above; each block is labeled with its exact package name — match "
+            "the package name/nights-breakdown precisely (e.g. '5 Nights - 4 "
+            "Nights Tbilisi + 1 Night Gudauri' is a DIFFERENT package from '6 "
+            "Nights - 4 Nights Tbilisi + 2 Nights Batumi') before using its "
+            "inclusions/exclusions — do NOT mix items from a different "
+            "package's list even if the wording looks similar)\n"
+            + incl_excl_block
+        )
+
 
 
     history_text = "".join(
@@ -1450,6 +1561,35 @@ def get_answer(col, question: str, history: list, api_key: str, model: str) -> t
         "- Train tickets ONLY if trains are in this itinerary\n"
         "- Price from KB only; omit field if not available\n"
         "- Do NOT generate ---JSON--- until hotel category is confirmed AND all other selections confirmed\n\n"
+
+        "## INCLUSIONS & EXCLUSIONS SELECTION — PACKAGE-EXACT MATCH (MANDATORY)\n"
+        "The '## AUTHORITATIVE INCLUSIONS & EXCLUSIONS' section below contains a SEPARATE "
+        "inclusions/exclusions list for EVERY package variant in the knowledge base. Many "
+        "packages share the same cities and nearly identical wording (e.g. 'Daily Breakfast', "
+        "'Round Airport Transfers', 'Tips for guide and driver' appear in almost every package), "
+        "but the NIGHT-BY-NIGHT accommodation breakdown is UNIQUE to each package and MUST match "
+        "exactly the itinerary you are building. For example:\n"
+        "  - '5 Nights - 4 Nights Tbilisi + 1 Night Gudauri' → inclusions list '3 Nights' "
+        "accommodation in Tbilisi', '1 Night accommodation in Gudauri', '1 Night accommodation "
+        "in Tbilisi' (i.e. split before/after the Gudauri night)\n"
+        "  - '6 Nights - 4 Nights Tbilisi + 2 Nights Batumi' → a COMPLETELY DIFFERENT inclusions "
+        "list with Batumi nights instead of Gudauri\n"
+        "These must NEVER be mixed, even though most of the other bullet points look identical.\n\n"
+        "STEP-BY-STEP:\n"
+        "  1. Identify the EXACT package heading that matches the itinerary's total nights and "
+        "the exact city + night split (e.g. '5 Nights - 4 Nights Tbilisi + 1 Night Gudauri').\n"
+        "  2. Locate the block in '## AUTHORITATIVE INCLUSIONS & EXCLUSIONS' whose 'Package:' "
+        "label matches that heading exactly (or as close as possible if the itinerary was "
+        "custom-modified from a base package).\n"
+        "  3. Copy that block's Inclusions and Exclusions items verbatim into the JSON "
+        "'inclusions' and 'exclusions' arrays.\n"
+        "  4. Do NOT invent, merge, or borrow any accommodation-night line item from a "
+        "different package's block — the night count and city split MUST reconcile with the "
+        "itinerary's actual day-by-day overnight cities.\n"
+        "  5. If no exact match exists (e.g. a fully custom itinerary), select the CLOSEST "
+        "matching package by nights/cities and adapt only the accommodation-night lines to "
+        "reflect the actual itinerary, keeping all other generic inclusions/exclusions intact.\n\n"
+
 
         f"## KNOWLEDGE BASE\n{context}\n\n"
         f"## CONVERSATION HISTORY\n{history_text}"

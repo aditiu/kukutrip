@@ -9,3 +9,5 @@ template/italy_v*.pdf
 template/georgia_v*.pdf
 *.zip
 template/header_bg.jpg
+.streamlit/secrets.toml
+app.py.backup
