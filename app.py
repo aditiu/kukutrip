@@ -3133,6 +3133,16 @@ def render_paste_content_mode(api_key, model, selected_theme_name):
 
     raw_content = st.text_area("Paste your content", height=350, key="paste_raw_content",
                                 placeholder="Paste your AI-generated itinerary here…")
+
+    price_basis_choice = st.radio(
+        "Price Basis",
+        ["Auto-detect from content", "Per Person", "Total Package"],
+        key="paste_price_basis_choice",
+        horizontal=True,
+        help="The price amount is taken exactly as written in the pasted content "
+             "(no calculation is performed). This only controls whether it is "
+             "labeled 'Price Per Person' or 'Total Package Cost' on the PDF.",
+    )
     st.caption(f"🎨 Using PDF Theme: **{selected_theme_name}** (change in sidebar)")
 
     if st.button("📄 Generate PDF", type="primary", use_container_width=True, key="paste_generate_pdf_btn"):
@@ -3145,6 +3155,21 @@ def render_paste_content_mode(api_key, model, selected_theme_name):
             except Exception as e:
                 st.error(f"Could not analyze the pasted content: {e}")
                 return
+
+        # ── Price: use the extracted amount exactly as provided — no
+        # calculation/conversion/markup is applied. The basis choice only
+        # selects the display label (Per Person vs Total Package).
+        raw_amount = (structured.get("amount") or "").strip()
+        if raw_amount:
+            if price_basis_choice == "Per Person":
+                is_pp = True
+            elif price_basis_choice == "Total Package":
+                is_pp = False
+            else:
+                is_pp = _is_per_person_amount(raw_amount)
+            structured["_final_price_label"] = "PRICE PER PERSON" if is_pp else "TOTAL PACKAGE COST"
+            structured["_final_price_value"] = raw_amount
+
         with st.spinner("Generating PDF…"):
             hdr_img = None
             try:
