@@ -2657,6 +2657,167 @@ def get_answer(col, question: str, history: list, api_key: str, model: str) -> t
     return answer, sources, meta
 
 
+# ── Paste Content → PDF (analysis, source-restricted, isolated from KB/RAG) ──
+# Lets a user paste an itinerary from ANY AI assistant and convert it into a
+# KukuTrip PDF WITHOUT touching the Knowledge Base / RAG pipeline at all.
+
+def _extract_json_from_llm_response(raw):
+    t = re.sub(r'^```[a-z]*\n?', '', (raw or "").strip())
+    t = re.sub(r'\n?```$', '', t).strip()
+    try:
+        o = json.loads(t)
+        if isinstance(o, dict):
+            return o
+    except Exception:
+        pass
+    m = re.search(r'\{.*\}', t, re.DOTALL)
+    if m:
+        try:
+            o = json.loads(m.group())
+            if isinstance(o, dict):
+                return o
+        except Exception:
+            pass
+    return {}
+
+def _validate_pdf_meta(meta):
+    if not isinstance(meta, dict) or not meta:
+        return False
+    days = meta.get("days", [])
+    if not isinstance(days, list):
+        return False
+    for d in days:
+        if not isinstance(d, dict):
+            return False
+        if "activities" in d and d["activities"] is not None and not isinstance(d["activities"], list):
+            return False
+    for k in ("hotels", "highlights", "inclusions", "exclusions", "notes"):
+        if k in meta and meta[k] is not None and not isinstance(meta[k], list):
+            return False
+    return True
+
+def _normalize_pdf_meta(meta):
+    defaults = {"destination": "", "package_name": "", "image_keyword": "", "route": "",
+                "dates": "", "nights": "", "persons": "", "transport": "", "days": [],
+                "hotels": [], "highlights": [], "inclusions": [], "exclusions": [],
+                "notes": [], "amount": ""}
+    out = {**defaults, **{k: v for k, v in meta.items() if v is not None}}
+    nd = []
+    for i, d in enumerate(out.get("days") or [], start=1):
+        if not isinstance(d, dict):
+            continue
+        nd.append({"day": d.get("day", i), "date": d.get("date", "") or "",
+                   "title": d.get("title", "") or "",
+                   "activities": [a for a in (d.get("activities") or []) if a],
+                   "overnight": d.get("overnight", "") or ""})
+    out["days"] = nd
+    for k in ("hotels", "highlights", "inclusions", "exclusions", "notes"):
+        out[k] = [x for x in (out.get(k) or []) if x]
+    if not out.get("package_name"):
+        out["package_name"] = out.get("destination") or "Travel Itinerary"
+    return out
+
+def analyze_pasted_content(raw_content, api_key, model):
+    """Analyze pasted AI-generated content into the existing PDF data model.
+    Source-restricted: Knowledge Base/RAG/web search/external knowledge = OFF."""
+    system = (
+        "You are a Content Analysis & Extraction engine for a travel itinerary PDF "
+        "generator. You will be given raw text a user pasted from an AI assistant "
+        "(ChatGPT, Claude, Gemini, Copilot, Perplexity, etc). Extract it into a "
+        "structured JSON object. This is NOT a generation task — never add travel "
+        "knowledge of your own.\n\n"
+        "## STRICT SOURCE RESTRICTION\nUse ONLY the pasted content. Knowledge Base=OFF, "
+        "RAG=OFF, document retrieval=OFF, web search=OFF, external travel knowledge=OFF. "
+        "Do not supplement missing details even if you know them.\n\n"
+        "## DO NOT INVENT MISSING VALUES\nIf dates/hotel/price/destination/traveler count "
+        "are absent, use empty string \"\" or empty list []. Empty is always better than guessed.\n\n"
+        "## CONVERSATIONAL WRAPPER\nExclude AI chat filler ('Absolutely! Here's...', "
+        "'Hope you have a great trip!') from extracted fields, but keep factual content.\n\n"
+        "## MARKDOWN & TABLES\nUnderstand #, ##, **bold**, lists, and | tables | semantically; "
+        "never leave markdown syntax characters in field values.\n\n"
+        "## LOSSLESS\nPreserve details that don't fit a specific field inside 'notes' verbatim "
+        "rather than dropping them.\n\n"
+        "## OUTPUT — JSON SCHEMA (reuse the existing PDF data model exactly)\n"
+        "Output ONLY one JSON object, no markdown fences, no explanation:\n"
+        "{\n"
+        '  "destination": "", "package_name": "", "image_keyword": "", "route": "",\n'
+        '  "dates": "", "nights": "", "persons": "", "transport": "",\n'
+        '  "days": [{"day":1,"date":"","title":"","activities":[],"overnight":""}],\n'
+        '  "hotels": [{"city":"","hotel":"","dates":""}],\n'
+        '  "highlights": [], "inclusions": [], "exclusions": [], "notes": [], "amount": ""\n'
+        "}\n"
+        "'days' MUST be an array (empty if none). Each day's 'activities' MUST be an array "
+        "of strings, one item per activity/meal/attraction/transfer — never merge into one "
+        "string. Number days sequentially as they appear in the source; never fabricate a day."
+    )
+    user = f"Analyze and extract the following pasted content:\n\n{raw_content}"
+    raw = call_gemini(api_key, model, system, user)
+    meta = _extract_json_from_llm_response(raw)
+    if not _validate_pdf_meta(meta):
+        repair_user = (
+            "Your previous output was invalid. Re-extract the SAME content below and output "
+            "ONLY one syntactically valid JSON object matching the schema — no fences, no text "
+            f"outside the JSON.\n\n{raw_content}"
+        )
+        raw2 = call_gemini(api_key, model, system, repair_user)
+        meta = _extract_json_from_llm_response(raw2)
+        if not _validate_pdf_meta(meta):
+            raise ValueError("Could not extract structured itinerary data from the pasted content.")
+    return _normalize_pdf_meta(meta)
+
+def render_paste_content_mode(api_key, model, selected_theme_name):
+    """Isolated UI for Paste Content → PDF. Never touches Knowledge Base/RAG."""
+    st.title("✈ Travel Itinerary Agent")
+    st.caption(
+        "Paste content directly from ChatGPT, Claude, Gemini, or any other AI "
+        "assistant. The content will be analyzed and converted into the KukuTrip "
+        "PDF format automatically."
+    )
+    raw_content = st.text_area("Paste your content", height=350, key="paste_raw_content",
+                                placeholder="Paste your AI-generated itinerary here…")
+    st.caption(f"🎨 Using PDF Theme: **{selected_theme_name}** (change in sidebar)")
+
+    if st.button("📄 Generate PDF", type="primary", use_container_width=True, key="paste_generate_pdf_btn"):
+        if not raw_content or not raw_content.strip():
+            st.error("Please paste some content before generating the PDF.")
+            return
+        with st.spinner("Analyzing pasted content…"):
+            try:
+                structured = analyze_pasted_content(raw_content, api_key, model)
+            except Exception as e:
+                st.error(f"Could not analyze the pasted content: {e}")
+                return
+        with st.spinner("Generating PDF…"):
+            hdr_img = None
+            try:
+                img_kw = structured.get("image_keyword") or structured.get("destination") or ""
+                if img_kw:
+                    hdr_img = fetch_destination_image(img_kw)
+            except Exception:
+                hdr_img = None
+            try:
+                pdf_bytes = generate_pdf_themed(
+                    structured.get("package_name") or "Itinerary",
+                    structured, selected_theme_name, header_img_path=hdr_img,
+                )
+            except Exception as e:
+                st.error(f"PDF generation failed: {e}")
+                return
+        st.session_state["paste_pdf_bytes"] = pdf_bytes
+        st.session_state["paste_pdf_name"] = f"itinerary_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        st.session_state["paste_pdf_structured"] = structured
+
+    if st.session_state.get("paste_pdf_bytes"):
+        st.success("✅ PDF generated successfully!")
+        st.download_button(
+            "⬇️ Download Itinerary PDF", data=st.session_state["paste_pdf_bytes"],
+            file_name=st.session_state.get("paste_pdf_name", "itinerary.pdf"),
+            mime="application/pdf", key="paste_download_pdf",
+        )
+        with st.expander("🔍 Extracted structured data (for review)"):
+            st.json(st.session_state.get("paste_pdf_structured", {}))
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -2701,69 +2862,96 @@ with st.sidebar:
     st.session_state["pdf_theme_name"] = pdf_theme_name
 
     st.divider()
-    st.subheader("📂 Travel Documents")
+    st.subheader("⚙️ PDF Generation Mode")
+    generation_mode = st.radio(
+        "Mode",
+        ["Knowledge Base", "Paste Content → PDF"],
+        key="generation_mode",
+        help="'Knowledge Base' uses your uploaded PDF/Word documents (RAG). "
+             "'Paste Content → PDF' converts content pasted from ChatGPT, "
+             "Claude, Gemini, or any AI assistant directly into a PDF — the "
+             "Knowledge Base is NOT used in this mode.",
+    )
+    # Only relevant in Knowledge Base mode — declared here so `existing`
+    # always exists (as an empty default) regardless of which mode is active.
+    existing = []
 
-    uploaded = st.file_uploader("Upload PDF or Word files", type=["pdf", "docx"], accept_multiple_files=True)
-    if uploaded:
-        DOCS_DIR.mkdir(exist_ok=True)
-        for f in uploaded:
-            (DOCS_DIR / f.name).write_bytes(f.read())
-        st.success(f"Saved {len(uploaded)} file(s)")
-        if CHROMA_DIR.exists():
-            shutil.rmtree(CHROMA_DIR)
-        st.cache_resource.clear()
-        st.session_state.pop("messages", None)
-
-    existing = (list(DOCS_DIR.glob("*.pdf")) + list(DOCS_DIR.glob("*.docx"))) if DOCS_DIR.exists() else []
-    if existing:
+    if generation_mode == "Knowledge Base":
         st.divider()
-        st.subheader("📄 Indexed Documents")
-        for f in sorted(existing):
-            st.write(f"• {f.name}")
+        st.subheader("📂 Travel Documents")
 
-    st.divider()
-    if st.button("🔄 Re-index Documents", use_container_width=True):
-        if CHROMA_DIR.exists():
-            shutil.rmtree(CHROMA_DIR)
-        st.cache_resource.clear()
-        st.session_state.pop("messages", None)
-        st.rerun()
+        uploaded = st.file_uploader("Upload PDF or Word files", type=["pdf", "docx"], accept_multiple_files=True)
+        if uploaded:
+            DOCS_DIR.mkdir(exist_ok=True)
+            for f in uploaded:
+                (DOCS_DIR / f.name).write_bytes(f.read())
+            st.success(f"Saved {len(uploaded)} file(s)")
+            if CHROMA_DIR.exists():
+                shutil.rmtree(CHROMA_DIR)
+            st.cache_resource.clear()
+            st.session_state.pop("messages", None)
 
-    # History
-    st.divider()
-    st.subheader("🕘 Previous Chats")
-    st.caption(f"Saved for {RETENTION} days")
-    col_new, col_clear = st.columns(2)
-    with col_new:
-        if st.button("➕ New Chat", use_container_width=True):
-            st.session_state.session_id = new_sid()
-            st.session_state.messages = []
-            st.rerun()
-    with col_clear:
-        if st.button("🗑️ Clear All", use_container_width=True):
-            if HISTORY_DIR.exists():
-                shutil.rmtree(HISTORY_DIR)
-            HISTORY_DIR.mkdir(exist_ok=True)
-            st.session_state.session_id = new_sid()
-            st.session_state.messages = []
+        existing = (list(DOCS_DIR.glob("*.pdf")) + list(DOCS_DIR.glob("*.docx"))) if DOCS_DIR.exists() else []
+        if existing:
+            st.divider()
+            st.subheader("📄 Indexed Documents")
+            for f in sorted(existing):
+                st.write(f"• {f.name}")
+
+        st.divider()
+        if st.button("🔄 Re-index Documents", use_container_width=True):
+            if CHROMA_DIR.exists():
+                shutil.rmtree(CHROMA_DIR)
+            st.cache_resource.clear()
+            st.session_state.pop("messages", None)
             st.rerun()
 
-    for sf in list_sessions()[:15]:
-        label = sf.stem.replace("_", " ", 1)
-        if st.button(f"📂 {label}", key=str(sf), use_container_width=True):
-            st.session_state.messages = load_session(sf)
-            st.session_state.session_id = sf.stem
-            st.rerun()
+        # History
+        st.divider()
+        st.subheader("🕘 Previous Chats")
+        st.caption(f"Saved for {RETENTION} days")
+        col_new, col_clear = st.columns(2)
+        with col_new:
+            if st.button("➕ New Chat", use_container_width=True):
+                st.session_state.session_id = new_sid()
+                st.session_state.messages = []
+                st.rerun()
+        with col_clear:
+            if st.button("🗑️ Clear All", use_container_width=True):
+                if HISTORY_DIR.exists():
+                    shutil.rmtree(HISTORY_DIR)
+                HISTORY_DIR.mkdir(exist_ok=True)
+                st.session_state.session_id = new_sid()
+                st.session_state.messages = []
+                st.rerun()
+
+        for sf in list_sessions()[:15]:
+            label = sf.stem.replace("_", " ", 1)
+            if st.button(f"📂 {label}", key=str(sf), use_container_width=True):
+                st.session_state.messages = load_session(sf)
+                st.session_state.session_id = sf.stem
+                st.rerun()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-st.title("✈ Travel Itinerary Agent")
-st.caption("Ask with dates & travelers — get a formatted itinerary + PDF instantly.")
-
 if not api_key:
+    st.title("✈ Travel Itinerary Agent")
     st.warning("Enter your **Google Gemini API key** in the sidebar. Free at https://aistudio.google.com")
     st.stop()
+
+# ── Isolated code path: Paste Content → PDF ──────────────────────────────────
+# This branch NEVER touches the Knowledge Base / RAG pipeline below it.
+if st.session_state.get("generation_mode") == "Paste Content → PDF":
+    render_paste_content_mode(
+        api_key, model,
+        st.session_state.get("pdf_theme_name", DEFAULT_PDF_THEME),
+    )
+    st.stop()
+
+# ── Knowledge Base mode (existing RAG flow, unchanged) ───────────────────────
+st.title("✈ Travel Itinerary Agent")
+st.caption("Ask with dates & travelers — get a formatted itinerary + PDF instantly.")
 
 if not existing:
     st.info("Upload travel documents (PDF/DOCX) in the sidebar to get started.")
