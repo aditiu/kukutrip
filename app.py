@@ -637,7 +637,7 @@ def generate_pdf(title: str, content: str, meta: dict,
         notes_html = f"""
 
         <div class="notes-card">
-          <div class="notes-title">📌 Important Notes</div>
+          <div class="notes-title">⚑ Important Notes</div>
           <ul>{items}</ul>
         </div>"""
 
