@@ -30,6 +30,17 @@ HISTORY_DIR  = Path("/tmp/.chat_history")
 TEMPLATE_DIR = Path("/tmp/template")
 RETENTION    = 5   # days
 
+# ── Knowledge source selection (Existing Knowledge Base vs Master Travel Plans) ─
+# Two independent, isolated knowledge sources the user can pick from in the
+# sidebar. "existing" is the original PDF/DOCX + ChromaDB RAG pipeline
+# (build_vectorstore/get_answer, unchanged). "master_travel_plans" is the new
+# Excel-based structured source (docs/All_Plans_of_KUKUTRIP_Master.xlsx),
+# implemented entirely separately below so the existing source's behavior,
+# indexing, and data are never touched by this feature.
+KB_SOURCE_EXISTING = "Existing Knowledge Base"
+KB_SOURCE_MASTER_PLANS = "KukuTrip Master Travel Plans"
+MASTER_PLANS_XLSX = DOCS_DIR / "All_Plans_of_KUKUTRIP_Master.xlsx"
+
 # ── Company branding (constant across all itineraries) ────────────────────────
 COMPANY_NAME  = "Ankur Sharma"
 COMPANY_PHONE = "+918929838899"
@@ -2233,6 +2244,500 @@ def extract_all_daywise_itinerary(docs_dir: Path) -> str:
     return "\n\n".join(blocks)
 
 
+# ── Master Travel Plans (new, independent Excel-based knowledge source) ───────
+# Isolated from the existing PDF/DOCX + ChromaDB knowledge base above. Reads
+# docs/All_Plans_of_KUKUTRIP_Master.xlsx directly on every query (small file,
+# loaded via st.cache_data so it is parsed once per session/file-mtime) and
+# performs structured filtering instead of chunk-based vector similarity
+# search, since the workbook's data is already normalized into tabular rows
+# keyed by "Package ID" across sheets. This NEVER touches CHROMA_DIR, the
+# existing `col` collection, or any of the docx/pdf extraction helpers above.
+#
+# Workbook structure (inspected directly — do not assume without re-checking
+# if the file changes):
+#   All 8 sheets share the same layout: 2 title rows + 1 blank row, then a
+#   real header row at (0-based) index 3, then data rows. So every sheet
+#   must be read with header=3.
+#   - "Packages"   : Package ID, Package Name, Country, Nights, Days, Route,
+#                    Validity, Hotel Options, From (USD pp)*  — one row per
+#                    package (204 rows spanning many countries/combinations)
+#   - "Pricing"    : Package ID, Package Name, Nights, Hotel Option, Category
+#                    (star rating e.g. '5*', '4*/3*'), Pax Tier (e.g. '2 Pax',
+#                    '4 Pax (USD)'), Price / Person (USD), Single Supp (USD),
+#                    Child No-Bed 0-11 (USD) — many rows per package (one per
+#                    hotel-category × pax-tier combination)
+#   - "Itinerary"  : Package ID, Package Name, Day, Title, Highlights — one
+#                    row per day per package
+#   - "Inclusions" : Package ID, Package Name, Common Inclusions,
+#                    Package-Specific Entries, Exclusions, Important Notes —
+#                    one row per package
+#   - "Travel Guides & Country Info": Destination / Country, Topic / Category,
+#                    Key Guidelines & Critical Advisories, Permit/Visa/ID
+#                    Requirements, Currency & Local Regulations
+#   - "Experiences & Activities": Destination / City, Experience / Activity
+#                    Name, Category / Type, Indicative Cost / Pricing,
+#                    Description & PDF Highlight Bullet, Operational Notes
+#   - "Terms & Conditions": Destination / Country, Policy Domain / Subject,
+#                    Standard Clause / Policy Details, Deadlines / Financial
+#                    Penalities, Operational Notes for PDF Generation
+#   - "Company Info": Attribute / Field, Official Details, Usage in Proposal
+
+MASTER_PLANS_SHEET_HEADER_ROW = 3  # 0-based header row index, same for all sheets
+
+
+@st.cache_data(show_spinner="Loading KukuTrip Master Travel Plans…")
+def load_master_plans_workbook(_mtime: float):
+    """
+    Load every sheet of the Master Travel Plans workbook into DataFrames.
+    `_mtime` (file modification time) is passed purely to bust the
+    st.cache_data cache when the source .xlsx is replaced/updated. Returns
+    a dict of {sheet_name: DataFrame}, or None if the file is missing/
+    unreadable — callers must handle that explicitly.
+    """
+    if not MASTER_PLANS_XLSX.exists():
+        return None
+    try:
+        import pandas as pd
+        xls = pd.ExcelFile(MASTER_PLANS_XLSX)
+        sheets = {}
+        for name in xls.sheet_names:
+            df = xls.parse(name, header=MASTER_PLANS_SHEET_HEADER_ROW)
+            df = df.dropna(how="all")  # drop spacer rows
+            sheets[name] = df
+        return sheets
+    except Exception:
+        return None
+
+
+def get_master_plans_workbook():
+    """Cache-aware accessor — re-reads the workbook only if its mtime changes."""
+    if not MASTER_PLANS_XLSX.exists():
+        return None
+    mtime = MASTER_PLANS_XLSX.stat().st_mtime
+    return load_master_plans_workbook(mtime)
+
+
+def _norm_text(s) -> str:
+    return str(s or "").strip().lower()
+
+def master_plans_all_countries(sheets: dict) -> list:
+    """Distinct country/route names from the Packages sheet, for error messages."""
+    df = sheets.get("Packages")
+    if df is None or "Country" not in df.columns:
+        return []
+    return sorted(df["Country"].dropna().astype(str).unique().tolist())
+
+
+def search_master_plans(sheets: dict, destination: str = "", nights=None, days=None):
+    """
+    Filter the Packages sheet for rows matching the given destination
+    (substring match against Country, case-insensitive — matches combined
+    routes like "Kazakhstan & Georgia" when searching "Georgia") and/or an
+    exact Nights or Days count. Returns the matching rows (may be empty).
+    Does not invent or fall back to unrelated packages — only real rows
+    from the sheet are ever returned.
+    """
+    import pandas as pd
+    df = sheets.get("Packages")
+    if df is None:
+        return pd.DataFrame()
+    out = df.copy()
+    if destination:
+        needle = _norm_text(destination)
+        out = out[out["Country"].astype(str).str.lower().str.contains(needle, na=False)]
+    if nights is not None:
+        out = out[pd.to_numeric(out["Nights"], errors="coerce") == nights]
+    if days is not None:
+        out = out[pd.to_numeric(out["Days"], errors="coerce") == days]
+    return out
+
+
+def get_master_plan_itinerary(sheets: dict, package_id: str):
+    import pandas as pd
+    df = sheets.get("Itinerary")
+    if df is None:
+        return pd.DataFrame()
+    return df[df["Package ID"].astype(str) == str(package_id)].sort_values(
+        by="Day", key=lambda s: pd.to_numeric(s, errors="coerce")
+    )
+
+
+def get_master_plan_inclusions(sheets: dict, package_id: str) -> dict:
+    df = sheets.get("Inclusions")
+    if df is None:
+        return {}
+    rows = df[df["Package ID"].astype(str) == str(package_id)]
+    if rows.empty:
+        return {}
+    r = rows.iloc[0]
+    return {
+        "common_inclusions": str(r.get("Common Inclusions", "") or ""),
+        "package_specific": str(r.get("Package-Specific Entries", "") or ""),
+        "exclusions": str(r.get("Exclusions", "") or ""),
+        "important_notes": str(r.get("Important Notes", "") or ""),
+    }
+
+
+def get_master_plan_pricing(sheets: dict, package_id: str):
+    df = sheets.get("Pricing")
+    if df is None:
+        return df
+    return df[df["Package ID"].astype(str) == str(package_id)]
+
+
+def get_master_plan_country_info(sheets: dict, country: str):
+    import pandas as pd
+    df = sheets.get("Travel Guides & Country Info")
+    if df is None:
+        return pd.DataFrame()
+    needle = _norm_text(country)
+    return df[df["Destination / Country"].astype(str).str.lower().str.contains(needle, na=False)]
+
+
+def get_master_plan_experiences(sheets: dict, destination: str):
+    import pandas as pd
+    df = sheets.get("Experiences & Activities")
+    if df is None:
+        return pd.DataFrame()
+    needle = _norm_text(destination)
+    return df[df["Destination / City"].astype(str).str.lower().str.contains(needle, na=False)]
+
+
+def get_master_plan_terms(sheets: dict, country: str):
+    import pandas as pd
+    df = sheets.get("Terms & Conditions")
+    if df is None:
+        return pd.DataFrame()
+    needle = _norm_text(country)
+    return df[df["Destination / Country"].astype(str).str.lower().str.contains(needle, na=False)]
+
+
+def build_master_plans_context(sheets: dict, matched_packages) -> str:
+    """
+    Build a compact, LLM-ready context block containing ONLY the rows
+    relevant to the matched package(s) — package summary, full day-wise
+    itinerary, inclusions/exclusions, pricing grid, and (if a small number
+    of distinct countries are involved) country guide/terms/experiences
+    info. Mirrors the existing docx pipeline's "authoritative block"
+    pattern (bypass vector retrieval, inject exact structured rows) but
+    reads from the Excel sheets instead of docx paragraphs/tables.
+    """
+    if matched_packages is None or matched_packages.empty:
+        return ""
+
+    blocks = []
+    countries_seen = set()
+    for _, pkg in matched_packages.iterrows():
+        pid = str(pkg.get("Package ID", ""))
+        if not pid:
+            continue
+        countries_seen.add(str(pkg.get("Country", "")))
+
+        blocks.append(
+            f"### PACKAGE SUMMARY — {pid}\n"
+            f"Package Name: {pkg.get('Package Name','')}\n"
+            f"Country: {pkg.get('Country','')}\n"
+            f"Nights: {pkg.get('Nights','')} | Days: {pkg.get('Days','')}\n"
+            f"Route: {pkg.get('Route','')}\n"
+            f"Validity: {pkg.get('Validity','')}\n"
+            f"Hotel Options available: {pkg.get('Hotel Options','')}\n"
+            f"Indicative starting price: USD {pkg.get('From (USD pp)*','')} per person"
+        )
+
+        itin = get_master_plan_itinerary(sheets, pid)
+        if not itin.empty:
+            lines = [f"### DAY-WISE ITINERARY — {pid} ({pkg.get('Package Name','')})"]
+            for _, day in itin.iterrows():
+                lines.append(
+                    f"Day {day.get('Day','')}: {day.get('Title','')} — {day.get('Highlights','')}"
+                )
+            blocks.append("\n".join(lines))
+
+        incl = get_master_plan_inclusions(sheets, pid)
+        if incl:
+            blocks.append(
+                f"### INCLUSIONS & EXCLUSIONS — {pid}\n"
+                f"Common Inclusions: {incl['common_inclusions']}\n"
+                f"Package-Specific Entries: {incl['package_specific']}\n"
+                f"Exclusions: {incl['exclusions']}\n"
+                f"Important Notes: {incl['important_notes']}"
+            )
+
+        pricing = get_master_plan_pricing(sheets, pid)
+        if pricing is not None and not pricing.empty:
+            lines = [f"### PRICE GRID (per person, twin-sharing, USD) — {pid}"]
+            for _, row in pricing.iterrows():
+                lines.append(
+                    f"Hotel Option: {row.get('Hotel Option','')} | Category: {row.get('Category','')} "
+                    f"| Pax Tier: {row.get('Pax Tier','')} | Price/Person (USD): {row.get('Price / Person (USD)','')} "
+                    f"| Single Supp (USD): {row.get('Single Supp (USD)','')} "
+                    f"| Child No-Bed 0-11 (USD): {row.get('Child No-Bed 0-11 (USD)','')}"
+                )
+            blocks.append("\n".join(lines))
+
+    if 0 < len(countries_seen) <= 3:
+        for country in countries_seen:
+            if not country:
+                continue
+            info = get_master_plan_country_info(sheets, country)
+            if not info.empty:
+                lines = [f"### TRAVEL GUIDE & COUNTRY INFO — {country}"]
+                for _, row in info.iterrows():
+                    lines.append(
+                        f"{row.get('Topic / Category','')}: "
+                        f"{row.get('Key Guidelines & Critical Advisories','')} "
+                        f"| Permit/Visa: {row.get('Permit / Visa / ID Requirements','')} "
+                        f"| Currency: {row.get('Currency & Local Regulations','')}"
+                    )
+                blocks.append("\n".join(lines))
+
+            terms = get_master_plan_terms(sheets, country)
+            if not terms.empty:
+                lines = [f"### TERMS & CONDITIONS — {country}"]
+                for _, row in terms.iterrows():
+                    lines.append(
+                        f"{row.get('Policy Domain / Subject','')}: "
+                        f"{row.get('Standard Clause / Policy Details','')} "
+                        f"({row.get('Deadlines / Financial Penalities','')})"
+                    )
+                blocks.append("\n".join(lines))
+
+            exp = get_master_plan_experiences(sheets, country)
+            if not exp.empty:
+                lines = [f"### OPTIONAL EXPERIENCES & ACTIVITIES — {country}"]
+                for _, row in exp.iterrows():
+                    lines.append(
+                        f"{row.get('Experience / Activity Name','')} "
+                        f"({row.get('Destination / City','')}, {row.get('Category / Type','')}): "
+                        f"{row.get('Description & PDF Highlight Bullet','')} "
+                        f"[{row.get('Indicative Cost / Pricing','')}]"
+                    )
+                blocks.append("\n".join(lines))
+
+    return "\n\n".join(blocks)
+
+def get_master_plans_answer(question: str, history: list, api_key: str, model: str,
+                            destination_hint: str = "", nights_hint=None,
+                            days_hint=None):
+    """
+    Master Travel Plans equivalent of get_answer() — same clarification /
+    JSON-itinerary-output contract (so the rest of the app — pending_meta,
+    pricing workflow, PDF generation — works unmodified), but retrieves
+    from the Excel workbook via structured filtering instead of ChromaDB
+    vector search. Completely isolated from `col`/build_vectorstore/
+    get_answer above; the existing knowledge base is never read here.
+    Returns (answer_markdown, sources_list, meta_dict).
+    """
+    sheets = get_master_plans_workbook()
+    if sheets is None:
+        return (
+            "⚠️ The KukuTrip Master Travel Plans file "
+            f"(`{MASTER_PLANS_XLSX.name}`) could not be found or read under `docs/`. "
+            "Please make sure it has been uploaded, then try again.",
+            [], {}
+        )
+
+    matched = search_master_plans(sheets, destination=destination_hint,
+                                  nights=nights_hint, days=days_hint)
+    if matched.empty and destination_hint:
+        matched_dest_only = search_master_plans(sheets, destination=destination_hint)
+        if matched_dest_only.empty:
+            available = master_plans_all_countries(sheets)
+            return (
+                f"I couldn't find a matching plan in the selected **KukuTrip Master "
+                f"Travel Plans** source for **{destination_hint}**. Available "
+                f"destinations include: {', '.join(available[:25])}"
+                f"{'…' if len(available) > 25 else ''}. Please choose a different "
+                "destination, or check the spelling.",
+                [], {}
+            )
+        matched = matched_dest_only
+
+    sources = sorted(set(matched["Package ID"].astype(str).tolist())) if not matched.empty else []
+    context = build_master_plans_context(sheets, matched)
+
+    history_text = "".join(
+        f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}\n"
+        for m in history[-6:]
+    )
+
+    system = (
+        "You are a professional Travel Itinerary Generation Agent acting as a "
+        "knowledgeable travel consultant.\n\n"
+
+        "## KNOWLEDGE SOURCE — SOURCE OF TRUTH\n"
+        "The 'KukuTrip Master Travel Plans' data provided below (extracted from the "
+        "master Excel database of pre-built packages) is your ONLY source for: "
+        "destinations, package names, nights/days, routes, hotels, day-wise "
+        "itineraries, inclusions, exclusions, important notes, and pricing. "
+        "NEVER invent travel information not present in the data below.\n\n"
+
+        "## CLARIFICATION WORKFLOW (FOLLOW EXACTLY — ACT LIKE A TRAVEL CONSULTANT)\n"
+        "STEP 1 — Understand the request.\n"
+        "STEP 2 — Check if critical information is missing:\n"
+        "  • Destination/country — if missing, ASK\n"
+        "  • Travel dates — ask if needed for the itinerary/pricing\n"
+        "  • Number of nights/days — if missing and multiple packages of "
+        "different durations exist for the destination, ASK\n"
+        "  • Number of adults, children (with ages if relevant), and rooms — if "
+        "missing and pricing/hotel selection depends on it, ASK\n"
+        "  • Preferred transportation — if relevant options exist, ASK\n"
+        "  • Hotel/category preference — if the matched package(s) below list "
+        "multiple hotel/star options, ASK which one\n"
+        "STEP 3 — If multiple materially different packages match (different "
+        "routes, durations, or hotel categories) — SHOW OPTIONS, wait for the "
+        "user's choice.\n"
+        "STEP 4 — Combine all missing questions into ONE concise message (max 4 "
+        "questions at once). Do not ask unnecessary questions — if only one "
+        "package/option exists below, use it automatically.\n"
+        "STEP 5 — Only once enough information is available AND (if applicable) "
+        "the user has picked a specific package/hotel category, respond in TWO "
+        "parts separated by ---READY---\n\n"
+        "PART 1: Friendly Markdown itinerary summary ending with:\n"
+        "'✅ **Your itinerary is ready. Click Generate PDF to create your document.**'\n\n"
+        "---READY---\n\n"
+        "PART 2: Structured JSON (schema below). Do NOT output ---READY--- during "
+        "## JSON SCHEMA\n"
+        "{\n"
+        '  "destination": "Country name",\n'
+        '  "package_name": "Exact or adapted package name from the data",\n'
+        '  "image_keyword": "Most iconic landmark/city for this destination",\n'
+        '  "route": "City1 · City2 · City3",\n'
+        '  "dates": "DD MMM – DD MMM YYYY (or empty if not provided)",\n'
+        '  "nights": "N Nights / N Days",\n'
+        '  "persons": "N Adults · N Children · N Rooms",\n'
+        '  "transport": "e.g. Private Cab, Self Drive",\n'
+        '  "days": [\n'
+        '    {"day": 1, "date": "DD MMM or empty", "title": "Day title",\n'
+        '     "activities": ["Activity 1", "Activity 2"],\n'
+        '     "overnight": "City (omit on final/departure day)"}\n'
+        "  ],\n"
+        '  "hotels": [{"city": "City (N Nights)", "hotel": "Hotel — Meal Plan", "dates": "DD–DD MMM"}],\n'
+        '  "highlights": ["Highlight 1"],\n'
+        '  "inclusions": ["Only applicable items"],\n'
+        '  "exclusions": ["Only applicable items"],\n'
+        '  "notes": ["Only applicable notes"],\n'
+        '  "amount": "Price from data e.g. USD 439 per person — omit if not available"\n'
+        "}\n\n"
+
+        "## DAY-WISE ITINERARY\n"
+        "Use the 'Title' and 'Highlights' fields from the DAY-WISE ITINERARY block "
+        "below verbatim for each day — split the Highlights text on ';' or ',' into "
+        "separate 'activities' array items rather than one long string. Number days "
+        "sequentially exactly as given. Infer the 'overnight' city from the route/"
+        "day title context (e.g. a day titled 'Tbilisi to Batumi' ends overnight in "
+        "Batumi) — never fabricate a city not mentioned in the route.\n\n"
+
+        "## PRICING\n"
+        "The PRICE GRID block lists price-per-person in USD by hotel category and "
+        "pax tier. Match the user's confirmed hotel category and traveller count to "
+        "select the correct row; if the user hasn't specified either yet, ASK before "
+        "quoting a specific price. Never invent a price not present in the grid.\n\n"
+
+        "## INCLUSIONS/EXCLUSIONS/NOTES\n"
+        "Copy the Common Inclusions and Package-Specific Entries (combined) "
+        "verbatim into the JSON 'inclusions' array (split on ';'), Exclusions into "
+        "'exclusions' (split on ';'), and Important Notes into 'notes' (as one or "
+        "more items) — do not omit or paraphrase them.\n\n"
+
+        "## PAX / PERSON / ADULT NORMALIZATION\n"
+        "Pax, Persons, Adults all refer to the same field (number of travellers). "
+        "Always output the JSON 'persons' field as 'N Adults · N Children · N Rooms'.\n\n"
+
+        "## DO NOT INVENT MISSING DATA\n"
+        "If the matched package data below does not include something (e.g. no "
+        "exact hotel name for a requested category), say so and ask the user, "
+        "rather than fabricating it. Distinguish clearly between user-provided "
+        "information, data from the Master Travel Plans source, and any "
+        "estimate/assumption (which must be explicitly marked as such if used).\n\n"
+
+        f"## KUKUTRIP MASTER TRAVEL PLANS DATA (matched to this request)\n{context}\n\n"
+        f"## CONVERSATION HISTORY\n{history_text}"
+    )
+
+    raw = call_gemini(api_key, model, system, question)
+
+    meta = {}
+    answer = raw
+    for sep in ("---READY---", "---JSON---"):
+        if sep in raw:
+            parts = raw.split(sep, 1)
+            answer = parts[0].strip()
+            json_str = parts[1].strip()
+            json_str = re.sub(r'^```[a-z]*\n?', '', json_str).strip()
+            json_str = re.sub(r'\n?```$', '', json_str).strip()
+            try:
+                meta = json.loads(json_str)
+            except Exception:
+                m = re.search(r'\{.*\}', json_str, re.DOTALL)
+                if m:
+                    try:
+                        meta = json.loads(m.group())
+                    except Exception:
+                        pass
+            break
+
+    if not meta:
+        m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+        if not m:
+            m = re.search(r'(\{\s*"destination".*?"notes".*?\})', raw, re.DOTALL)
+        if m:
+            try:
+                meta = json.loads(m.group(1))
+                answer = raw[:m.start()].strip()
+                if not answer:
+                    answer = f"Here is your itinerary for **{meta.get('destination','')}**."
+            except Exception:
+                pass
+
+    return answer, sources, meta
+
+
+def extract_master_plans_hints(text: str) -> dict:
+    """
+    Lightweight heuristic extraction of destination/nights/days hints from
+    the user's latest free-text message, used to pre-filter the Packages
+    sheet before invoking the LLM. This is best-effort only — the LLM's
+    own clarification workflow (in get_master_plans_answer's system
+    prompt) is the authoritative fallback for anything this misses; it
+    never blocks the conversation, it only narrows the initial data slice
+    handed to the model.
+    """
+    hints = {"destination": "", "nights": None, "days": None}
+    m = re.search(r'(\d+)\s*[Nn]ight', text)
+    if m:
+        hints["nights"] = int(m.group(1))
+    m = re.search(r'(\d+)\s*[Dd]ay', text)
+    if m:
+        hints["days"] = int(m.group(1))
+    return hints
+
+
+def guess_master_plans_destination(sheets: dict, text: str) -> str:
+    """
+    Best-effort match of a country/destination name mentioned in free text
+    against the actual set of countries present in the Packages sheet
+    (including combo routes like "Kazakhstan & Georgia"). Only ever
+    returns a name that literally exists in the sheet — never invents or
+    guesses beyond what's really there. Returns "" if nothing matches.
+    """
+    countries = master_plans_all_countries(sheets)
+    needle = _norm_text(text)
+    # Prefer the longest matching country/combo name to avoid a generic
+    # single-country match masking a more specific combo match.
+    matches = [c for c in countries if c and _norm_text(c) in needle]
+    if matches:
+        return max(matches, key=len)
+    # Fall back to checking individual words of each combo against the text
+    for c in sorted(countries, key=len, reverse=True):
+        parts = re.split(r'\s*&\s*|,\s*', c)
+        for p in parts:
+            if p and _norm_text(p) in needle:
+                return c
+    return ""
+
+
+
 # ── Vector store ──────────────────────────────────────────────────────────────
 
 
@@ -3250,16 +3755,43 @@ with st.sidebar:
         "Mode",
         ["Knowledge Base", "Paste Content → PDF"],
         key="generation_mode",
-        help="'Knowledge Base' uses your uploaded PDF/Word documents (RAG). "
-             "'Paste Content → PDF' converts content pasted from ChatGPT, "
-             "Claude, Gemini, or any AI assistant directly into a PDF — the "
-             "Knowledge Base is NOT used in this mode.",
+        help="'Knowledge Base' uses your uploaded PDF/Word documents (RAG) or "
+             "the KukuTrip Master Travel Plans Excel database, per the "
+             "'Knowledge Source' selector below. 'Paste Content → PDF' "
+             "converts content pasted from ChatGPT, Claude, Gemini, or any "
+             "AI assistant directly into a PDF — no knowledge source is "
+             "used in this mode.",
     )
     # Only relevant in Knowledge Base mode — declared here so `existing`
     # always exists (as an empty default) regardless of which mode is active.
     existing = []
 
     if generation_mode == "Knowledge Base":
+        st.divider()
+        st.subheader("🗂️ Knowledge Source")
+        knowledge_source = st.selectbox(
+            "Knowledge Source",
+            [KB_SOURCE_EXISTING, KB_SOURCE_MASTER_PLANS],
+            key="knowledge_source",
+            help=f"'{KB_SOURCE_EXISTING}' uses your uploaded PDF/Word documents "
+                 f"(unchanged RAG pipeline). '{KB_SOURCE_MASTER_PLANS}' uses the "
+                 f"pre-built KukuTrip package database "
+                 f"({MASTER_PLANS_XLSX.name}) instead — these two sources are "
+                 "completely independent; switching between them does not "
+                 "affect the other's data or indexing.",
+        )
+        if knowledge_source == KB_SOURCE_MASTER_PLANS:
+            if MASTER_PLANS_XLSX.exists():
+                st.caption(f"✅ Found `{MASTER_PLANS_XLSX.name}` under docs/")
+            else:
+                st.warning(
+                    f"⚠️ `{MASTER_PLANS_XLSX.name}` not found under `docs/`. "
+                    "Please add the file to use this source."
+                )
+    else:
+        knowledge_source = KB_SOURCE_EXISTING
+
+    if generation_mode == "Knowledge Base" and knowledge_source == KB_SOURCE_EXISTING:
         st.divider()
         st.subheader("📂 Travel Documents")
 
@@ -3332,103 +3864,197 @@ if st.session_state.get("generation_mode") == "Paste Content → PDF":
     )
     st.stop()
 
+# ── Isolated code path: KukuTrip Master Travel Plans ─────────────────────────
+# Completely separate from the existing ChromaDB/docx knowledge base below —
+# never calls build_vectorstore(), never touches CHROMA_DIR, never reads
+# DOCS_DIR's pdf/docx files. Reuses the same pending_meta/pdf_ready/
+# "Itinerary Ready Card" pricing+PDF-generation flow at the bottom of this
+# file, so the existing PDF generator is reused unchanged for both sources.
+if st.session_state.get("knowledge_source") == KB_SOURCE_MASTER_PLANS:
+    st.title("✈ Travel Itinerary Agent")
+    st.caption(
+        "Knowledge Source: **KukuTrip Master Travel Plans** — ask with your "
+        "destination, dates & travelers to get a formatted itinerary + PDF."
+    )
+
+    _mp_sheets = get_master_plans_workbook()
+    if _mp_sheets is None:
+        st.error(
+            f"⚠️ Could not load `{MASTER_PLANS_XLSX.name}` from `docs/`. "
+            "Please make sure the file exists and is a valid Excel workbook."
+        )
+        st.stop()
+    st.success(
+        f"✅ Loaded **{len(_mp_sheets.get('Packages', []))}** packages from "
+        f"KukuTrip Master Travel Plans. Ready!"
+    )
+
+    if "mp_messages" not in st.session_state:
+        st.session_state.mp_messages = [
+            {"role": "assistant", "content":
+             "Hi! I'm your KukuTrip travel consultant. Tell me your destination, "
+             "travel dates, and number of travelers — I'll find the best matching "
+             "package from our master database and build your itinerary! 🗺️"}
+        ]
+
+    _mp_latest_pdf_idx = -1
+    for _i, _m in enumerate(st.session_state.mp_messages):
+        if _m.get("pdf"):
+            _mp_latest_pdf_idx = _i
+
+    for idx, msg in enumerate(st.session_state.mp_messages):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg.get("pdf") and idx == _mp_latest_pdf_idx:
+                st.download_button(
+                    "⬇️ Download Itinerary PDF",
+                    data=bytes.fromhex(msg["pdf"]),
+                    file_name=msg.get("pdf_name", "itinerary.pdf"),
+                    mime="application/pdf",
+                    key=f"mp_dl_{msg.get('_id', id(msg))}",
+                )
+
+    if mp_prompt := st.chat_input(
+        "e.g. I want to visit Georgia for 6 nights with 2 adults",
+        key="mp_chat_input",
+    ):
+        st.session_state.mp_messages.append({"role": "user", "content": mp_prompt})
+        with st.chat_message("user"):
+            st.markdown(mp_prompt)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Searching KukuTrip Master Travel Plans…"):
+                try:
+                    hints = extract_master_plans_hints(mp_prompt)
+                    dest_hint = guess_master_plans_destination(_mp_sheets, mp_prompt)
+                    answer, sources, meta = get_master_plans_answer(
+                        mp_prompt, st.session_state.mp_messages[:-1], api_key, model,
+                        destination_hint=dest_hint,
+                        nights_hint=hints["nights"], days_hint=hints["days"],
+                    )
+                    if sources:
+                        answer += f"\n\n---\n*📦 Matched Package IDs: {', '.join(sorted(sources))}*"
+                except Exception as e:
+                    answer = f"❌ Error: {e}"
+                    meta = {}
+
+            if meta and not answer.startswith("❌"):
+                st.session_state.pending_meta = meta
+                st.session_state.pdf_ready = True
+                for _k in ("price_conv_rate", "price_display_mode", "price_markup_raw",
+                           "price_workflow_done", "final_price_label", "final_price_value"):
+                    st.session_state.pop(_k, None)
+            elif not answer.startswith("❌"):
+                st.session_state.pdf_ready = False
+
+            msg_entry = {
+                "role": "assistant",
+                "content": answer,
+                "_id": len(st.session_state.mp_messages),
+            }
+            if meta:
+                msg_entry["meta"] = meta
+            st.session_state.mp_messages.append(msg_entry)
+            st.rerun()
+
 # ── Knowledge Base mode (existing RAG flow, unchanged) ───────────────────────
-st.title("✈ Travel Itinerary Agent")
-st.caption("Ask with dates & travelers — get a formatted itinerary + PDF instantly.")
+else:
+    st.title("✈ Travel Itinerary Agent")
+    st.caption("Ask with dates & travelers — get a formatted itinerary + PDF instantly.")
 
-if not existing:
-    st.info("Upload travel documents (PDF/DOCX) in the sidebar to get started.")
-    st.stop()
-
-with st.spinner("Loading document index…"):
-    try:
-        col = build_vectorstore()
-    except Exception as e:
-        st.error(f"Failed to build index: {e}")
+    if not existing:
+        st.info("Upload travel documents (PDF/DOCX) in the sidebar to get started.")
         st.stop()
 
-if col is None:
-    st.info("No documents indexed yet — upload files in the sidebar.")
-    st.stop()
+    with st.spinner("Loading document index…"):
+        try:
+            col = build_vectorstore()
+        except Exception as e:
+            st.error(f"Failed to build index: {e}")
+            st.stop()
 
-# col.count() can fail if persisted DB schema is stale — auto-rebuild if so
-try:
-    chunk_count = col.count()
-except Exception:
-    # Stale/incompatible DB — wipe and rebuild
-    if CHROMA_DIR.exists():
-        shutil.rmtree(CHROMA_DIR)
-    st.cache_resource.clear()
-    st.rerun()
+    if col is None:
+        st.info("No documents indexed yet — upload files in the sidebar.")
+        st.stop()
 
-st.success(f"✅ Indexed **{chunk_count}** chunks from {len(existing)} file(s). Ready!")
-
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content":
-         "Hi! Tell me your travel dates, number of travelers, and destination — "
-         "I'll create a personalised itinerary using your documents and generate a PDF! 🗺️"}
-    ]
-
-# Find the index of the most recent message with a PDF
-_latest_pdf_idx = -1
-for _i, _m in enumerate(st.session_state.messages):
-    if _m.get("pdf"):
-        _latest_pdf_idx = _i
-
-for idx, msg in enumerate(st.session_state.messages):
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        # Only show download button on the most recent PDF message
-        if msg.get("pdf") and idx == _latest_pdf_idx:
-            st.download_button(
-                "⬇️ Download Itinerary PDF",
-                data=bytes.fromhex(msg["pdf"]),
-                file_name=msg.get("pdf_name", "itinerary.pdf"),
-                mime="application/pdf",
-                key=f"dl_{msg.get('_id', id(msg))}",
-            )
-
-if prompt := st.chat_input("e.g. Plan a 5-day Georgia trip for 2 adults + 1 kid, 20-25 Aug 2026"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Gemini is crafting your itinerary…"):
-            try:
-                answer, sources, meta = get_answer(
-                    col, prompt, st.session_state.messages[:-1], api_key, model
-                )
-                if sources:
-                    answer += f"\n\n---\n*📄 Sources: {', '.join(sorted(sources))}*"
-            except Exception as e:
-                answer = f"❌ Error: {e}"
-                meta = {}
-
-        # When meta present, store as pending — do NOT auto-generate PDF
-        if meta and not answer.startswith("❌"):
-            st.session_state.pending_meta = meta
-            st.session_state.pdf_ready = True
-            # Reset pricing workflow state for the new itinerary
-            for _k in ("price_conv_rate", "price_display_mode", "price_markup_raw",
-                       "price_workflow_done", "final_price_label", "final_price_value"):
-                st.session_state.pop(_k, None)
-        elif not answer.startswith("❌"):
-            # A clarification/question reply — itinerary not yet ready
-            st.session_state.pdf_ready = False
-
-        msg_entry = {
-            "role": "assistant",
-            "content": answer,
-            "_id": len(st.session_state.messages),
-        }
-        if meta:
-            msg_entry["meta"] = meta
-
-        st.session_state.messages.append(msg_entry)
-        save_session(st.session_state.session_id, st.session_state.messages)
+    # col.count() can fail if persisted DB schema is stale — auto-rebuild if so
+    try:
+        chunk_count = col.count()
+    except Exception:
+        # Stale/incompatible DB — wipe and rebuild
+        if CHROMA_DIR.exists():
+            shutil.rmtree(CHROMA_DIR)
+        st.cache_resource.clear()
         st.rerun()
+
+    st.success(f"✅ Indexed **{chunk_count}** chunks from {len(existing)} file(s). Ready!")
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content":
+             "Hi! Tell me your travel dates, number of travelers, and destination — "
+             "I'll create a personalised itinerary using your documents and generate a PDF! 🗺️"}
+        ]
+
+    # Find the index of the most recent message with a PDF
+    _latest_pdf_idx = -1
+    for _i, _m in enumerate(st.session_state.messages):
+        if _m.get("pdf"):
+            _latest_pdf_idx = _i
+
+    for idx, msg in enumerate(st.session_state.messages):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            # Only show download button on the most recent PDF message
+            if msg.get("pdf") and idx == _latest_pdf_idx:
+                st.download_button(
+                    "⬇️ Download Itinerary PDF",
+                    data=bytes.fromhex(msg["pdf"]),
+                    file_name=msg.get("pdf_name", "itinerary.pdf"),
+                    mime="application/pdf",
+                    key=f"dl_{msg.get('_id', id(msg))}",
+                )
+
+    if prompt := st.chat_input("e.g. Plan a 5-day Georgia trip for 2 adults + 1 kid, 20-25 Aug 2026"):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Gemini is crafting your itinerary…"):
+                try:
+                    answer, sources, meta = get_answer(
+                        col, prompt, st.session_state.messages[:-1], api_key, model
+                    )
+                    if sources:
+                        answer += f"\n\n---\n*📄 Sources: {', '.join(sorted(sources))}*"
+                except Exception as e:
+                    answer = f"❌ Error: {e}"
+                    meta = {}
+
+            # When meta present, store as pending — do NOT auto-generate PDF
+            if meta and not answer.startswith("❌"):
+                st.session_state.pending_meta = meta
+                st.session_state.pdf_ready = True
+                # Reset pricing workflow state for the new itinerary
+                for _k in ("price_conv_rate", "price_display_mode", "price_markup_raw",
+                           "price_workflow_done", "final_price_label", "final_price_value"):
+                    st.session_state.pop(_k, None)
+            elif not answer.startswith("❌"):
+                # A clarification/question reply — itinerary not yet ready
+                st.session_state.pdf_ready = False
+
+            msg_entry = {
+                "role": "assistant",
+                "content": answer,
+                "_id": len(st.session_state.messages),
+            }
+            if meta:
+                msg_entry["meta"] = meta
+
+            st.session_state.messages.append(msg_entry)
+            save_session(st.session_state.session_id, st.session_state.messages)
+            st.rerun()
 
 
 # ── Itinerary Ready Card + Pricing Workflow + Generate PDF Button ─────────────
