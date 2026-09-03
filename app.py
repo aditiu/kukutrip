@@ -4326,20 +4326,39 @@ if st.session_state.get("pdf_ready") and st.session_state.get("pending_meta"):
                     # Save PDF to template dir
                     TEMPLATE_DIR.mkdir(exist_ok=True)
                     (TEMPLATE_DIR / pdf_n).write_bytes(pdf_b)
-                    # Store in last assistant message
-                    for i in range(len(st.session_state.messages) - 1, -1, -1):
-                        if st.session_state.messages[i].get("role") == "assistant":
-                            st.session_state.messages[i]["pdf"]      = pdf_b.hex()
-                            st.session_state.messages[i]["pdf_name"] = pdf_n
+
+                    # Attach the generated PDF to the last assistant message in
+                    # whichever chat history list is currently active — the
+                    # existing Knowledge Base flow uses `messages`, while the
+                    # isolated KukuTrip Master Travel Plans flow uses its own
+                    # `mp_messages` list. Attaching to the wrong (empty/unused)
+                    # list means no rendered chat message ever gets the "pdf"
+                    # key set, so the Download button never appears even
+                    # though the PDF was generated successfully.
+                    _active_msgs_key = (
+                        "mp_messages"
+                        if st.session_state.get("knowledge_source") == KB_SOURCE_MASTER_PLANS
+                        else "messages"
+                    )
+                    _active_msgs = st.session_state.get(_active_msgs_key, [])
+                    for i in range(len(_active_msgs) - 1, -1, -1):
+                        if _active_msgs[i].get("role") == "assistant":
+                            _active_msgs[i]["pdf"]      = pdf_b.hex()
+                            _active_msgs[i]["pdf_name"] = pdf_n
                             break
                     # Append image debug info to last assistant message for visibility
                     if _img_dbg:
                         img_note = "\n\n*🖼️ Image: " + " | ".join(_img_dbg) + "*"
-                        for i in range(len(st.session_state.messages) - 1, -1, -1):
-                            if st.session_state.messages[i].get("role") == "assistant":
-                                st.session_state.messages[i]["content"] += img_note
+                        for i in range(len(_active_msgs) - 1, -1, -1):
+                            if _active_msgs[i].get("role") == "assistant":
+                                _active_msgs[i]["content"] += img_note
                                 break
-                    save_session(st.session_state.session_id, st.session_state.messages)
+                    st.session_state[_active_msgs_key] = _active_msgs
+                    # Session history (save_session) only applies to the
+                    # Knowledge Base chat — the Master Travel Plans chat isn't
+                    # persisted to disk history, matching its existing behavior.
+                    if _active_msgs_key == "messages":
+                        save_session(st.session_state.session_id, st.session_state.messages)
                     st.session_state.pdf_ready = False
                     st.session_state.last_pdf       = pdf_b
                     st.session_state.last_pdf_name  = pdf_n
