@@ -2793,8 +2793,19 @@ def build_vectorstore():
 # ── Gemini call ───────────────────────────────────────────────────────────────
 
 def call_gemini(api_key: str, model: str, system: str, user: str) -> str:
-    import requests
-    url     = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    """
+    Call the Gemini generateContent API, with automatic retry/backoff on
+    HTTP 429 (rate limit / quota exceeded) and 503 (transiently overloaded)
+    responses. Gemini's free tier enforces both a requests-per-minute and a
+    requests-per-day quota; a 429 almost always means one of those limits
+    was hit. We retry a few times with increasing delays (honoring the
+    server's suggested `retryDelay` from the error body when present)
+    before giving up with a clear, actionable error message instead of a
+    raw "429 Client Error" traceback.
+    """
+    import requests, time
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     _p = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
     proxies = {"https": _p, "http": _p} if _p else {}
     payload = {
@@ -2809,12 +2820,49 @@ def call_gemini(api_key: str, model: str, system: str, user: str) -> str:
         # (notes/amount), which then disappears from the generated PDF
         # even though earlier sections still render correctly.
         "generationConfig": {"temperature": 0.7, "maxOutputTokens": 8192}
-
     }
-    resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"},
-                         params={"key": api_key}, proxies=proxies, timeout=90)
-    resp.raise_for_status()
-    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+    max_attempts = 4
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"},
+                             params={"key": api_key}, proxies=proxies, timeout=90)
+        if resp.status_code in (429, 503):
+            last_err = resp
+            if attempt == max_attempts:
+                break
+            # Prefer the server's suggested retry delay if present in the
+            # error body (Gemini returns RetryInfo.retryDelay e.g. "23s").
+            wait_s = min(30, 2 ** attempt)
+            try:
+                body = resp.json()
+                for detail in body.get("error", {}).get("details", []):
+                    rd = detail.get("retryDelay")
+                    if rd:
+                        wait_s = min(30, float(str(rd).rstrip("s")) + 1)
+                        break
+            except Exception:
+                pass
+            time.sleep(wait_s)
+            continue
+        resp.raise_for_status()
+        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+    # Exhausted all retries on 429/503 — raise a clear, actionable error.
+    if last_err is not None and last_err.status_code == 429:
+        raise RuntimeError(
+            "Gemini API rate limit / quota exceeded (HTTP 429) after several "
+            "retries. This usually means the free-tier requests-per-minute "
+            "or requests-per-day limit for this API key/model has been hit. "
+            "Please wait a minute and try again, switch to a different model "
+            "in the sidebar, or use an API key with a higher quota."
+        )
+    if last_err is not None:
+        raise RuntimeError(
+            f"Gemini API returned HTTP {last_err.status_code} after several "
+            "retries — the service may be temporarily overloaded. Please try again shortly."
+        )
+    raise RuntimeError("Gemini API call failed for an unknown reason.")
 
 
 def get_answer(col, question: str, history: list, api_key: str, model: str) -> tuple[str, list[str], dict]:
