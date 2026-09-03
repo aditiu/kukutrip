@@ -3065,7 +3065,14 @@ def find_packages_by_name(index_df, text: str):
     if len(cleaned) < 4:
         return pd.DataFrame()
     needle = _norm_text(cleaned)
-    names_norm = index_df["Package Name"].astype(str).str.lower()
+    # NOTE: Series.astype(str) does NOT reliably turn NaN/float cells into
+    # the string "nan" on all pandas versions (observed with pandas 3.x's
+    # Arrow-backed string dtype, which leaves NaN as an actual float). Any
+    # subsequent `x in n` check on such a leftover float raises
+    # "argument of type 'float' is not a container or iterable". Force a
+    # plain Python str() on every element (not vectorized astype) to
+    # guarantee we only ever compare against real strings.
+    names_norm = index_df["Package Name"].apply(lambda n: str(n).lower() if n is not None else "")
     exact = index_df[names_norm == needle]
     if not exact.empty:
         return exact
