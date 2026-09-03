@@ -4348,14 +4348,18 @@ with st.sidebar:
     if generation_mode == "Knowledge Base":
         st.divider()
         st.subheader("🗂️ Knowledge Source")
+        # KukuTrip Master Travel Plans is the default source (listed first)
+        # — it's the pre-built package database most requests should use.
+        # The existing PDF/Word-based Knowledge Base remains available and
+        # fully unchanged; the user can still switch to it explicitly.
         knowledge_source = st.selectbox(
             "Knowledge Source",
-            [KB_SOURCE_EXISTING, KB_SOURCE_MASTER_PLANS],
+            [KB_SOURCE_MASTER_PLANS, KB_SOURCE_EXISTING],
             key="knowledge_source",
-            help=f"'{KB_SOURCE_EXISTING}' uses your uploaded PDF/Word documents "
-                 f"(unchanged RAG pipeline). '{KB_SOURCE_MASTER_PLANS}' uses the "
-                 f"pre-built KukuTrip package database "
-                 f"({MASTER_PLANS_XLSX.name}) instead — these two sources are "
+            help=f"'{KB_SOURCE_MASTER_PLANS}' (default) uses the pre-built "
+                 f"KukuTrip package database ({MASTER_PLANS_XLSX.name}). "
+                 f"'{KB_SOURCE_EXISTING}' uses your uploaded PDF/Word documents "
+                 "(unchanged RAG pipeline) instead — these two sources are "
                  "completely independent; switching between them does not "
                  "affect the other's data or indexing.",
         )
