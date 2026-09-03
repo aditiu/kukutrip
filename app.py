@@ -388,6 +388,23 @@ def _h(text: str) -> str:
             .replace('"', "&quot;"))
 
 
+def _strip_package_code(text: str) -> str:
+    """
+    Remove an internal Master Travel Plans package code (e.g. "(AZE-6BG)")
+    from a package name/title before it is rendered on the customer-facing
+    PDF header/hero. Package codes are only meant for internal
+    identification during the chat conversation, never for the document.
+    """
+    t = str(text or "")
+    # Drop a trailing "(CODE)" parenthetical, e.g. "Baku with Ganja (AZE-6BG)"
+    t = re.sub(r'\s*\([A-Za-z]{2,5}-[A-Za-z0-9]{2,8}\)\s*$', '', t)
+    # Also drop a bare leading/trailing code with no parentheses, in case
+    # the LLM emitted it plainly (e.g. "AZE-6BG Baku with Ganja")
+    t = re.sub(r'^\s*[A-Za-z]{2,5}-[A-Za-z0-9]{2,8}\s*[-:]?\s*', '', t)
+    t = re.sub(r'\s*[-:]?\s*[A-Za-z]{2,5}-[A-Za-z0-9]{2,8}\s*$', '', t)
+    return t.strip() or str(text or "").strip()
+
+
 def _extract_amount_value(amount_str: str) -> float | None:
     """Extract the first numeric value from a price string, ignoring currency symbols/commas."""
     if not amount_str:
@@ -538,7 +555,11 @@ def generate_pdf(title: str, content: str, meta: dict,
         )
 
 
-    pkg_name  = _h(meta.get("package_name", meta.get("destination", title)).upper())
+    # Strip any trailing/embedded package-code parenthetical (e.g.
+    # "Baku with Ganja (AZE-6BG)") before displaying — the code is an
+    # internal Master Travel Plans identifier and should never appear on
+    # the customer-facing PDF header.
+    pkg_name  = _h(_strip_package_code(meta.get("package_name", meta.get("destination", title))).upper())
     route_txt = _h(meta.get("route", ""))
     dates_txt = _h(meta.get("dates", ""))
     nights_txt = _h(_format_nights_days(meta.get("nights", ""), meta.get("days")))
@@ -1153,7 +1174,7 @@ def generate_pdf_editorial(title: str, meta: dict, theme: dict | None = None) ->
 
     theme = theme or PDF_THEMES["Modern Editorial"]
 
-    pkg_name   = _h(meta.get("package_name", meta.get("destination", title)).upper())
+    pkg_name   = _h(_strip_package_code(meta.get("package_name", meta.get("destination", title))).upper())
     route_txt  = _h(meta.get("route", ""))
     dates_txt  = _h(meta.get("dates", ""))
     nights_txt = _h(_format_nights_days(meta.get("nights", ""), meta.get("days")))
