@@ -2517,8 +2517,7 @@ def build_master_plans_context(sheets: dict, matched_packages) -> str:
     return "\n\n".join(blocks)
 
 def get_master_plans_answer(question: str, history: list, api_key: str, model: str,
-                            destination_hint: str = "", nights_hint=None,
-                            days_hint=None):
+                            trip_state: dict | None = None):
     """
     Master Travel Plans equivalent of get_answer() — same clarification /
     JSON-itinerary-output contract (so the rest of the app — pending_meta,
@@ -2526,32 +2525,125 @@ def get_master_plans_answer(question: str, history: list, api_key: str, model: s
     from the Excel workbook via structured filtering instead of ChromaDB
     vector search. Completely isolated from `col`/build_vectorstore/
     get_answer above; the existing knowledge base is never read here.
-    Returns (answer_markdown, sources_list, meta_dict).
+
+    Unlike the original per-turn-only implementation, this now takes (and
+    updates) a persistent `trip_state` dict covering destination, dates,
+    duration, traveler counts, hotel category, and the currently selected
+    package — so information already established earlier in the
+    conversation (or via package selection) is never re-requested. Package
+    selection (by exact code, by name, or by reference to a previously
+    presented option) is resolved BEFORE falling back to a fresh
+    destination/duration search, per the required search priority.
+
+    Returns (answer_markdown, sources_list, meta_dict, updated_trip_state).
     """
+    if trip_state is None:
+        trip_state = default_master_plans_trip_state()
+
     sheets = get_master_plans_workbook()
     if sheets is None:
         return (
             "⚠️ The KukuTrip Master Travel Plans file "
             f"(`{MASTER_PLANS_XLSX.name}`) could not be found or read under `docs/`. "
             "Please make sure it has been uploaded, then try again.",
-            [], {}
+            [], {}, trip_state
         )
 
-    matched = search_master_plans(sheets, destination=destination_hint,
-                                  nights=nights_hint, days=days_hint)
-    if matched.empty and destination_hint:
-        matched_dest_only = search_master_plans(sheets, destination=destination_hint)
-        if matched_dest_only.empty:
-            available = master_plans_all_countries(sheets)
-            return (
-                f"I couldn't find a matching plan in the selected **KukuTrip Master "
-                f"Travel Plans** source for **{destination_hint}**. Available "
-                f"destinations include: {', '.join(available[:25])}"
-                f"{'…' if len(available) > 25 else ''}. Please choose a different "
-                "destination, or check the spelling.",
-                [], {}
-            )
-        matched = matched_dest_only
+    # Multi-sheet package index — package code/name search & selection must
+    # never be limited to whichever sheet happens to be checked first.
+    index_df = build_master_plans_package_index(sheets)
+
+    # ── STEP 1: does this message select/confirm a specific package? ───────
+    # Highest-priority signal, checked in the required order: exact package
+    # code > reference to a previously presented option (number/ordinal/
+    # code/name) > a package name typed fresh (not from a presented list).
+    selected_row = None
+
+    explicit_code = extract_explicit_package_code(index_df, question)
+    if explicit_code:
+        selected_row = find_package_row_by_code(index_df, explicit_code)
+
+    if selected_row is None:
+        opt = resolve_option_selection(question, trip_state.get("presented_options") or [], index_df)
+        if opt is not None:
+            selected_row = find_package_row_by_code(index_df, opt.get("code", ""))
+
+    if selected_row is None:
+        name_matches = find_packages_by_name(index_df, question)
+        if len(name_matches) == 1:
+            selected_row = name_matches.iloc[0]
+        elif len(name_matches) > 1:
+            # Ambiguous name match across sheets/countries — present the
+            # real candidates as options rather than guessing.
+            options = []
+            for _, r in name_matches.head(6).iterrows():
+                options.append({
+                    "code": str(r.get("Package ID", "")), "name": str(r.get("Package Name", "")),
+                    "country": str(r.get("Country", "")), "nights": r.get("Nights", ""),
+                    "days": r.get("Days", ""), "route": str(r.get("Route", "")),
+                })
+            trip_state["presented_options"] = options
+            lines = ["I found a few packages matching that name — which one did you mean?\n"]
+            for i, o in enumerate(options, start=1):
+                lines.append(f"**{i}.** {o['name']} ({o['code']}) — {o['country']}, {o['nights']} Nights")
+            return ("\n".join(lines), [], {}, trip_state)
+
+        # ── STEP 2: merge any new free-text trip details from this message ─────
+    # Always extract new details (dates/duration/travelers/etc.) regardless
+    # of whether a package was also selected in the same message, and merge
+    # them into the persistent state WITHOUT erasing anything previously
+    # known (merge_trip_state only overwrites fields that are non-empty in
+    # new_fields).
+    new_fields = extract_trip_fields(question, sheets=sheets)
+    trip_state = merge_trip_state(trip_state, new_fields)
+
+    if selected_row is not None:
+        _nights_val = trip_state.get("duration_nights")
+        _raw_nights = str(selected_row.get("Nights", "")).strip()
+        if _raw_nights.replace(".", "", 1).isdigit():
+            _nights_val = int(float(_raw_nights))
+        _days_val = trip_state.get("duration_days")
+        _raw_days = str(selected_row.get("Days", "")).strip()
+        if _raw_days.replace(".", "", 1).isdigit():
+            _days_val = int(float(_raw_days))
+        trip_state = merge_trip_state(trip_state, {
+            "selected_package_code": str(selected_row.get("Package ID", "")),
+            "selected_package_name": str(selected_row.get("Package Name", "")),
+            "destination": str(selected_row.get("Country", "") or ""),
+            "route": str(selected_row.get("Route", "") or ""),
+            "duration_nights": _nights_val,
+            "duration_days": _days_val,
+        })
+        # A confirmed package selection supersedes the previously presented
+        # options list — the choice has been made.
+        trip_state["presented_options"] = []
+
+    # ── STEP 3: determine what package data to search for / retrieve ───────
+    destination_hint = trip_state.get("destination", "")
+    nights_hint = trip_state.get("duration_nights")
+    days_hint = trip_state.get("duration_days")
+
+    if trip_state.get("selected_package_code"):
+        # A specific package is already selected — retrieve exactly that
+        # package's full details rather than re-running a broad search.
+        matched = index_df[index_df["Package ID"].astype(str).str.upper() ==
+                           trip_state["selected_package_code"].upper()]
+    else:
+        matched = search_master_plans(sheets, destination=destination_hint,
+                                      nights=nights_hint, days=days_hint)
+        if matched.empty and destination_hint:
+            matched_dest_only = search_master_plans(sheets, destination=destination_hint)
+            if matched_dest_only.empty:
+                available = master_plans_all_countries(sheets)
+                return (
+                    f"I couldn't find a matching plan in the selected **KukuTrip Master "
+                    f"Travel Plans** source for **{destination_hint}**. Available "
+                    f"destinations include: {', '.join(available[:25])}"
+                    f"{'…' if len(available) > 25 else ''}. Please choose a different "
+                    "destination, or check the spelling.",
+                    [], {}, trip_state
+                )
+            matched = matched_dest_only
 
     # ── Avoid dumping the ENTIRE workbook into the LLM context ──────────────
     # If no destination was recognised at all, `search_master_plans` returns
@@ -2563,14 +2655,15 @@ def get_master_plans_answer(question: str, history: list, api_key: str, model: s
     # the user picks a destination first — mirroring the "act like a travel
     # consultant, ask before generating" requirement.
     MAX_PACKAGES_FOR_LLM_CONTEXT = 12
-    if not destination_hint and len(matched) > MAX_PACKAGES_FOR_LLM_CONTEXT:
+    if not destination_hint and not trip_state.get("selected_package_code") \
+            and len(matched) > MAX_PACKAGES_FOR_LLM_CONTEXT:
         available = master_plans_all_countries(sheets)
         return (
             "I'd love to help plan your trip! Could you tell me which "
             "**destination/country** you're interested in? Available options "
             f"in our KukuTrip Master Travel Plans include: {', '.join(available[:25])}"
             f"{'…' if len(available) > 25 else ''}.",
-            [], {}
+            [], {}, trip_state
         )
     # Even with a destination match, cap how many package rows are expanded
     # into full context (summary + itinerary + pricing + inclusions each) to
@@ -2580,6 +2673,18 @@ def get_master_plans_answer(question: str, history: list, api_key: str, model: s
     # matches.
     if len(matched) > MAX_PACKAGES_FOR_LLM_CONTEXT:
         matched = matched.head(MAX_PACKAGES_FOR_LLM_CONTEXT)
+
+    # Save the newly matched options as "presented" for next-turn selection
+    # resolution, UNLESS a specific package is already confirmed/selected.
+    if not trip_state.get("selected_package_code") and not matched.empty:
+        options = []
+        for _, r in matched.iterrows():
+            options.append({
+                "code": str(r.get("Package ID", "")), "name": str(r.get("Package Name", "")),
+                "country": str(r.get("Country", "")), "nights": r.get("Nights", ""),
+                "days": r.get("Days", ""), "route": str(r.get("Route", "")),
+            })
+        trip_state["presented_options"] = options
 
     sources = sorted(set(matched["Package ID"].astype(str).tolist())) if not matched.empty else []
     context = build_master_plans_context(sheets, matched)
@@ -2600,24 +2705,60 @@ def get_master_plans_answer(question: str, history: list, api_key: str, model: s
         "itineraries, inclusions, exclusions, important notes, and pricing. "
         "NEVER invent travel information not present in the data below.\n\n"
 
+        "## PERSISTENT TRIP STATE (already known — DO NOT re-ask for any of this)\n"
+        "This reflects everything gathered so far in THIS conversation, already "
+        "merged with any package the user has selected. Treat every non-'unknown' "
+        "value below as already answered:\n"
+        f"{format_trip_state_for_prompt(trip_state)}\n\n"
+
+        "## PREVIOUSLY PRESENTED OPTIONS (if the user's message refers to one of "
+        "these by number, name, or code, it has ALREADY been resolved into the "
+        "trip state above — do not ask the user to re-specify it)\n"
+        f"{format_presented_options_for_prompt(trip_state.get('presented_options') or [])}\n\n"
+
+        "## MANDATORY REASONING CHECK BEFORE ASKING ANY QUESTION\n"
+        "Before asking the user anything, check: 'Do I already know this from "
+        "(1) the conversation history, (2) the PERSISTENT TRIP STATE above, or "
+        "(3) the selected package's data below?' If yes for a field, DO NOT ask "
+        "about it again. Only ask about fields that are genuinely 'unknown' "
+        "above AND are required for the next step (e.g. hotel category, "
+        "adult/child breakdown, rooms). If 'selected_package_code' above is not "
+        "'unknown', a package has ALREADY been chosen — do not ask which "
+        "destination/country/package the user wants; instead ask only about the "
+        "remaining unknown fields needed to finalize (e.g. hotel category, "
+        "adult/child split, rooms).\n\n"
+
         "## CLARIFICATION WORKFLOW (FOLLOW EXACTLY — ACT LIKE A TRAVEL CONSULTANT)\n"
-        "STEP 1 — Understand the request.\n"
-        "STEP 2 — Check if critical information is missing:\n"
-        "  • Destination/country — if missing, ASK\n"
-        "  • Travel dates — ask if needed for the itinerary/pricing\n"
-        "  • Number of nights/days — if missing and multiple packages of "
-        "different durations exist for the destination, ASK\n"
-        "  • Number of adults, children (with ages if relevant), and rooms — if "
-        "missing and pricing/hotel selection depends on it, ASK\n"
-        "  • Preferred transportation — if relevant options exist, ASK\n"
-        "  • Hotel/category preference — if the matched package(s) below list "
-        "multiple hotel/star options, ASK which one\n"
+        "STEP 1 — Understand the request, using the PERSISTENT TRIP STATE above as "
+        "the source of everything already known — never re-derive facts already "
+        "listed there from scratch.\n"
+        "STEP 2 — Check ONLY the fields marked 'unknown' above for what's still "
+        "missing:\n"
+        "  • Destination/country — ONLY ask if 'destination' above is 'unknown' "
+        "AND no package is selected\n"
+        "  • Travel dates — ask only if 'start_date' is 'unknown' and needed for "
+        "the itinerary/pricing\n"
+        "  • Number of nights/days — ONLY ask if both 'duration_nights' and "
+        "'duration_days' above are 'unknown' and multiple packages of different "
+        "durations exist for the destination\n"
+        "  • Number of adults, children (with ages if relevant), and rooms — ask "
+        "only about whichever of 'adults'/'children'/'children_ages'/'rooms' "
+        "above is still 'unknown' and required for pricing/hotel selection. If "
+        "'total_travelers' is known but the adult/child split is 'unknown', ask "
+        "ONLY for that split — do not ask for the total again.\n"
+        "  • Preferred transportation — only if 'transport' above is 'unknown' "
+        "and relevant options exist\n"
+        "  • Hotel/category preference — only if 'hotel_category' above is "
+        "'unknown' and the matched package(s) below list multiple hotel/star "
+        "options\n"
         "STEP 3 — If multiple materially different packages match (different "
-        "routes, durations, or hotel categories) — SHOW OPTIONS, wait for the "
+        "routes, durations, or hotel categories) AND no package is selected yet — "
+        "SHOW OPTIONS (numbered, with package name AND code), wait for the "
         "user's choice.\n"
         "STEP 4 — Combine all missing questions into ONE concise message (max 4 "
         "questions at once). Do not ask unnecessary questions — if only one "
-        "package/option exists below, use it automatically.\n"
+        "package/option exists below, or a package is already selected in the "
+        "PERSISTENT TRIP STATE, use it automatically.\n"
         "STEP 5 — Only once enough information is available AND (if applicable) "
         "the user has picked a specific package/hotel category, respond in TWO "
         "parts separated by ---READY---\n\n"
@@ -2723,7 +2864,7 @@ def get_master_plans_answer(question: str, history: list, api_key: str, model: s
             except Exception:
                 pass
 
-    return answer, sources, meta
+    return answer, sources, meta, trip_state
 
 
 def extract_master_plans_hints(text: str) -> dict:
@@ -2768,6 +2909,308 @@ def guess_master_plans_destination(sheets: dict, text: str) -> str:
             if p and _norm_text(p) in needle:
                 return c
     return ""
+
+
+
+# ── Master Travel Plans: persistent trip-state, multi-sheet package index, ───
+# and package code/name/option-number resolution.
+#
+# WHY THIS EXISTS: previously each user message was treated in isolation —
+# only nights/days/destination were re-extracted per turn and handed to the
+# LLM. This caused genuinely provided information (destination, dates,
+# traveller count) to be forgotten as soon as the user picked a package from
+# a presented list, since picking a package (e.g. "Baku with Ganja (AZE-6BG)")
+# doesn't itself mention "Azerbaijan" or "7 days" again, so nothing in the
+# old per-turn extraction recognised it as a destination/duration match and
+# the agent incorrectly restarted the destination-discovery question.
+#
+# FIX: maintain an explicit, persistent `trip_state` dict across the whole
+# Master Travel Plans conversation (held in st.session_state.mp_trip_state),
+# merge only newly-provided fields into it every turn (never erasing
+# previously known fields), and resolve package selections (by exact code,
+# by name, or by a reference to a previously presented option/number) before
+# ever falling back to a fresh destination/duration search.
+
+PACKAGE_CODE_RE = re.compile(r'\b[A-Za-z]{2,5}-[A-Za-z0-9]{2,8}\b')
+
+MASTER_PLANS_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+    "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+MASTER_PLANS_ORDINAL_WORDS = {
+    "first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3,
+    "fourth": 4, "4th": 4, "fifth": 5, "5th": 5, "sixth": 6, "6th": 6,
+    "seventh": 7, "7th": 7, "eighth": 8, "8th": 8, "ninth": 9, "9th": 9,
+    "tenth": 10, "10th": 10,
+}
+
+
+def default_master_plans_trip_state() -> dict:
+    """Fresh, empty persistent trip-state dict for a new Master Travel Plans conversation."""
+    return {
+        "destination": "", "start_date": "", "end_date": "",
+        "duration_nights": None, "duration_days": None,
+        "adults": None, "children": None, "children_ages": "",
+        "rooms": None, "total_travelers": None, "hotel_category": "",
+        "transport": "", "selected_package_code": "", "selected_package_name": "",
+        "route": "", "presented_options": [],
+    }
+
+
+def merge_trip_state(state: dict, new_fields: dict) -> dict:
+    """
+    Update ONLY the fields present (non-empty/non-None) in `new_fields`,
+    leaving every other existing field in `state` untouched. This is what
+    guarantees "Actually, we are 6 people" updates total_travelers without
+    erasing destination/dates/duration/selected_package_*.
+    """
+    for k, v in new_fields.items():
+        if v is None or v == "" or v == []:
+            continue
+        state[k] = v
+    return state
+
+def build_master_plans_package_index(sheets: dict):
+    """
+    Build a single lookup table (Package ID, Package Name, Country, Nights,
+    Days, Route, ...) across ALL relevant sheets, not just "Packages". In
+    this workbook every package code originates in "Packages", but the
+    index defensively also picks up any Package ID that appears in Pricing/
+    Itinerary/Inclusions but is somehow missing from "Packages", so package
+    code/name search never silently misses a package because it wasn't
+    re-checked against every sheet.
+    """
+    import pandas as pd
+    packages_df = sheets.get("Packages")
+    if packages_df is None:
+        return pd.DataFrame(columns=["Package ID", "Package Name", "Country",
+                                     "Nights", "Days", "Route"])
+    index_df = packages_df.copy()
+    known_ids = set(index_df["Package ID"].astype(str))
+    for sheet_name in ("Pricing", "Itinerary", "Inclusions"):
+        other = sheets.get(sheet_name)
+        if other is None or "Package ID" not in other.columns:
+            continue
+        extra_ids = set(other["Package ID"].astype(str)) - known_ids
+        for pid in extra_ids:
+            row = other[other["Package ID"].astype(str) == pid].iloc[0]
+            index_df = pd.concat([index_df, pd.DataFrame([{
+                "Package ID": pid,
+                "Package Name": row.get("Package Name", ""),
+                "Country": "", "Nights": row.get("Nights"), "Days": None,
+                "Route": "", "Validity": "", "Hotel Options": None,
+                "From (USD pp)*": None,
+            }])], ignore_index=True)
+            known_ids.add(pid)
+    return index_df
+
+
+def find_package_row_by_code(index_df, code: str):
+    """Exact (case-insensitive) Package ID lookup across the full multi-sheet index."""
+    if index_df is None or index_df.empty or not code:
+        return None
+    rows = index_df[index_df["Package ID"].astype(str).str.upper() == code.upper()]
+    if rows.empty:
+        return None
+    return rows.iloc[0]
+
+
+def extract_explicit_package_code(index_df, text: str) -> str:
+    """
+    Find a package code (e.g. 'AZE-6BG') mentioned in free text and verify
+    it actually exists in the index before accepting it — this is the
+    strongest, highest-priority selection signal per the package-selection
+    requirements, so it must never produce a false positive.
+    """
+    if index_df is None or index_df.empty:
+        return ""
+    candidates = PACKAGE_CODE_RE.findall(text or "")
+    if not candidates:
+        return ""
+    known = set(index_df["Package ID"].astype(str).str.upper())
+    for c in candidates:
+        if c.upper() in known:
+            return c.upper()
+    return ""
+
+
+
+def _clean_master_plans_selection_text(text: str) -> str:
+    """Strip conversational wrapper phrases and any parenthetical package
+    code so what remains is (hopefully) just the package name itself."""
+    t = (text or "").strip()
+    t = re.sub(r'\([^)]*\)', '', t)  # drop "(AZE-6BG)"-style parentheticals
+    t = re.sub(
+        r'^(i want|i\'ll take|i will take|i prefer|i choose|i like|i\'d like|'
+        r'let\'s go with|lets go with|please book|select|choose|book|go with)\s+',
+        '', t, flags=re.I,
+    )
+    return t.strip(' .!"\'')
+
+
+def find_packages_by_name(index_df, text: str):
+    """
+    Case-insensitive package-name match against the full multi-sheet index
+    (Scenario 2 — user names a package that was never explicitly presented).
+    Requires a reasonably specific cleaned query (>= 4 chars) to avoid
+    matching on generic short phrases.
+    """
+    import pandas as pd
+    if index_df is None or index_df.empty:
+        return pd.DataFrame()
+    cleaned = _clean_master_plans_selection_text(text)
+    if len(cleaned) < 4:
+        return pd.DataFrame()
+    needle = _norm_text(cleaned)
+    names_norm = index_df["Package Name"].astype(str).str.lower()
+    exact = index_df[names_norm == needle]
+    if not exact.empty:
+        return exact
+    contains = index_df[names_norm.apply(lambda n: bool(n) and (needle in n or n in needle))]
+    return contains
+
+
+def resolve_option_selection(text: str, presented_options: list, index_df):
+    """
+    Resolve a reference to a previously PRESENTED option — by option number
+    ("Option 1", "1", "the first one"), by package code, or by package name
+    — against the exact list of options the agent showed the user in its
+    previous reply (stored in trip_state["presented_options"]). Returns the
+    matching option dict, or None if nothing in the presented list matches.
+    """
+    if not presented_options:
+        return None
+    t = _norm_text(text)
+
+    m = re.search(r'\boption\s*#?\s*(\d+)\b', t)
+    if not m:
+        m = re.search(r'^\s*(\d+)\s*[.):]?\s*$', text.strip())
+    if m:
+        idx = int(m.group(1))
+        if 1 <= idx <= len(presented_options):
+            return presented_options[idx - 1]
+
+    for word, idx in MASTER_PLANS_ORDINAL_WORDS.items():
+        if re.search(rf'\b{re.escape(word)}\b', t) and 1 <= idx <= len(presented_options):
+            return presented_options[idx - 1]
+
+    cleaned = _clean_master_plans_selection_text(text)
+    needle = _norm_text(cleaned)
+    for opt in presented_options:
+        code = _norm_text(opt.get("code", ""))
+        if code and code in t:
+            return opt
+    for opt in presented_options:
+        name_n = _norm_text(opt.get("name", ""))
+        if name_n and len(needle) >= 4 and (name_n in needle or needle in name_n):
+            return opt
+    return None
+
+
+
+def extract_trip_fields(text: str, sheets: dict | None = None) -> dict:
+    """
+    Extract every trip-relevant field mentioned in a single free-text
+    message: destination, duration (nights/days), traveler counts (total/
+    adults/children), rooms, hotel star category, and a start date (month +
+    day, optionally year). Best-effort only — returns {} keys for anything
+    not found so merge_trip_state() leaves those fields untouched.
+    """
+    fields: dict = {}
+    t = text or ""
+
+    m = re.search(r'(\d+)\s*[Nn]ight', t)
+    if m:
+        fields["duration_nights"] = int(m.group(1))
+    m = re.search(r'(\d+)\s*[Dd]ay', t)
+    if m:
+        fields["duration_days"] = int(m.group(1))
+
+    m = re.search(r'(\d+)\s*adults?\b', t, re.I)
+    if m:
+        fields["adults"] = int(m.group(1))
+    m = re.search(r'(\d+)\s*child(?:ren)?\b', t, re.I)
+    if m:
+        fields["children"] = int(m.group(1))
+    m = re.search(r'(\d+)\s*rooms?\b', t, re.I)
+    if m:
+        fields["rooms"] = int(m.group(1))
+
+    m = re.search(r'\b(\d)\s*\*|\b(\d)\s*[- ]?star\b', t, re.I)
+    if m:
+        star = m.group(1) or m.group(2)
+        fields["hotel_category"] = f"{star}*"
+
+    # "4 people" / "4 pax" / "4 travelers" / "we are 6 people" etc. — total
+    # traveler count. Deliberately checked AFTER adults/children so an
+    # explicit adults/children breakdown isn't shadowed by a generic total.
+    m = re.search(r'\b(\d+)\s*(?:people|pax|persons|travellers|travelers|guests)\b', t, re.I)
+    if m:
+        fields["total_travelers"] = int(m.group(1))
+
+    month_pat = "|".join(MASTER_PLANS_MONTHS.keys())
+    m = re.search(rf'\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_pat})[a-z]*\s*,?\s*(\d{{4}})?\b', t, re.I)
+    day_s = month_s = year_s = None
+    if m:
+        day_s, month_s, year_s = m.group(1), m.group(2), m.group(3)
+    else:
+        m2 = re.search(rf'\b({month_pat})[a-z]*\s+(\d{{1,2}})(?:st|nd|rd|th)?\s*,?\s*(\d{{4}})?\b', t, re.I)
+        if m2:
+            month_s, day_s, year_s = m2.group(1), m2.group(2), m2.group(3)
+    if month_s and day_s:
+        date_str = f"{int(day_s):02d} {month_s.title()[:3]}"
+        if year_s:
+            date_str += f" {year_s}"
+        fields["start_date"] = date_str
+
+    if sheets is not None:
+        dest = guess_master_plans_destination(sheets, t)
+        if dest:
+            fields["destination"] = dest
+
+    return fields
+
+
+def format_trip_state_for_prompt(state: dict) -> str:
+    """Render the persistent trip-state dict as a compact, LLM-readable block."""
+    def _v(x):
+        return x if x not in (None, "", []) else "unknown"
+    lines = [
+        f"destination: {_v(state.get('destination'))}",
+        f"start_date: {_v(state.get('start_date'))}",
+        f"end_date: {_v(state.get('end_date'))}",
+        f"duration_nights: {_v(state.get('duration_nights'))}",
+        f"duration_days: {_v(state.get('duration_days'))}",
+        f"total_travelers: {_v(state.get('total_travelers'))}",
+        f"adults: {_v(state.get('adults'))}",
+        f"children: {_v(state.get('children'))}",
+        f"children_ages: {_v(state.get('children_ages'))}",
+        f"rooms: {_v(state.get('rooms'))}",
+        f"hotel_category: {_v(state.get('hotel_category'))}",
+        f"transport: {_v(state.get('transport'))}",
+        f"selected_package_code: {_v(state.get('selected_package_code'))}",
+        f"selected_package_name: {_v(state.get('selected_package_name'))}",
+        f"route: {_v(state.get('route'))}",
+    ]
+    return "\n".join(lines)
+
+
+def format_presented_options_for_prompt(options: list) -> str:
+    if not options:
+        return "(none presented yet)"
+    lines = []
+    for i, opt in enumerate(options, start=1):
+        lines.append(
+            f"{i}. {opt.get('name','')} ({opt.get('code','')}) — "
+            f"{opt.get('country','')}, {opt.get('nights','')} Nights / "
+            f"{opt.get('days','')} Days, Route: {opt.get('route','')}"
+        )
+    return "\n".join(lines)
+
+
 
 
 
@@ -4004,6 +4447,12 @@ if st.session_state.get("knowledge_source") == KB_SOURCE_MASTER_PLANS:
              "travel dates, and number of travelers — I'll find the best matching "
              "package from our master database and build your itinerary! 🗺️"}
         ]
+    # Persistent trip state for this conversation — destination, dates,
+    # duration, traveler counts, selected package, and previously presented
+    # options all survive across turns so genuinely provided information
+    # (including a package the user has already picked) is never re-asked.
+    if "mp_trip_state" not in st.session_state:
+        st.session_state.mp_trip_state = default_master_plans_trip_state()
 
     _mp_latest_pdf_idx = -1
     for _i, _m in enumerate(st.session_state.mp_messages):
@@ -4033,13 +4482,15 @@ if st.session_state.get("knowledge_source") == KB_SOURCE_MASTER_PLANS:
         with st.chat_message("assistant"):
             with st.spinner("Searching KukuTrip Master Travel Plans…"):
                 try:
-                    hints = extract_master_plans_hints(mp_prompt)
-                    dest_hint = guess_master_plans_destination(_mp_sheets, mp_prompt)
-                    answer, sources, meta = get_master_plans_answer(
+                    answer, sources, meta, updated_state = get_master_plans_answer(
                         mp_prompt, st.session_state.mp_messages[:-1], api_key, model,
-                        destination_hint=dest_hint,
-                        nights_hint=hints["nights"], days_hint=hints["days"],
+                        trip_state=st.session_state.mp_trip_state,
                     )
+                    # Persist the merged trip state (destination, dates,
+                    # duration, travelers, selected package, presented
+                    # options) so the NEXT turn never re-asks for anything
+                    # already established here.
+                    st.session_state.mp_trip_state = updated_state
                     # NOTE: matched Package IDs are intentionally NOT appended to
                     # the chat answer — showing that block on every reply pushed
                     # the "Generate PDF" button out of view / below the fold.
