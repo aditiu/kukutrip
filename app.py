@@ -2553,6 +2553,34 @@ def get_master_plans_answer(question: str, history: list, api_key: str, model: s
             )
         matched = matched_dest_only
 
+    # ── Avoid dumping the ENTIRE workbook into the LLM context ──────────────
+    # If no destination was recognised at all, `search_master_plans` returns
+    # every package (200+ rows across 46 countries). Building the full
+    # itinerary/pricing/inclusions context for all of them makes the prompt
+    # enormous, which is what was causing the Gemini API call to take a long
+    # time and eventually hit the 90s read timeout. Instead, short-circuit
+    # with a cheap, instant clarification question (no LLM call at all) so
+    # the user picks a destination first — mirroring the "act like a travel
+    # consultant, ask before generating" requirement.
+    MAX_PACKAGES_FOR_LLM_CONTEXT = 12
+    if not destination_hint and len(matched) > MAX_PACKAGES_FOR_LLM_CONTEXT:
+        available = master_plans_all_countries(sheets)
+        return (
+            "I'd love to help plan your trip! Could you tell me which "
+            "**destination/country** you're interested in? Available options "
+            f"in our KukuTrip Master Travel Plans include: {', '.join(available[:25])}"
+            f"{'…' if len(available) > 25 else ''}.",
+            [], {}
+        )
+    # Even with a destination match, cap how many package rows are expanded
+    # into full context (summary + itinerary + pricing + inclusions each) to
+    # keep the prompt size — and therefore response time — reasonable. The
+    # cap is generous enough to cover every real destination/nights
+    # combination in the workbook, which rarely exceeds a handful of exact
+    # matches.
+    if len(matched) > MAX_PACKAGES_FOR_LLM_CONTEXT:
+        matched = matched.head(MAX_PACKAGES_FOR_LLM_CONTEXT)
+
     sources = sorted(set(matched["Package ID"].astype(str).tolist())) if not matched.empty else []
     context = build_master_plans_context(sheets, matched)
 
@@ -2655,7 +2683,12 @@ def get_master_plans_answer(question: str, history: list, api_key: str, model: s
         f"## CONVERSATION HISTORY\n{history_text}"
     )
 
-    raw = call_gemini(api_key, model, system, question)
+    # Larger timeout/attempts than the default: the injected context here
+    # (package summary + full day-wise itinerary + price grid + inclusions
+    # for up to MAX_PACKAGES_FOR_LLM_CONTEXT packages) is typically bigger
+    # than the docx-based Knowledge Base context, so generation can
+    # legitimately take longer.
+    raw = call_gemini(api_key, model, system, question, timeout=150, max_attempts=2)
 
     meta = {}
     answer = raw
@@ -2792,18 +2825,26 @@ def build_vectorstore():
 
 # ── Gemini call ───────────────────────────────────────────────────────────────
 
-def call_gemini(api_key: str, model: str, system: str, user: str) -> str:
+def call_gemini(api_key: str, model: str, system: str, user: str,
+                timeout: int = 120, max_attempts: int = 3) -> str:
     """
     Call the Gemini generateContent API, with automatic retry/backoff on
-    HTTP 429 (rate limit / quota exceeded) and 503 (transiently overloaded)
-    responses. Gemini's free tier enforces both a requests-per-minute and a
-    requests-per-day quota; a 429 almost always means one of those limits
-    was hit. We retry a few times with increasing delays (honoring the
-    server's suggested `retryDelay` from the error body when present)
-    before giving up with a clear, actionable error message instead of a
-    raw "429 Client Error" traceback.
+    HTTP 429 (rate limit / quota exceeded), 503 (transiently overloaded),
+    and network-level read timeouts. Gemini's free tier enforces both a
+    requests-per-minute and a requests-per-day quota; a 429 almost always
+    means one of those limits was hit. Large prompts (e.g. many matched
+    packages injected as context) can also legitimately take longer than
+    the default timeout to generate a full JSON itinerary, so timeouts are
+    retried too rather than failing immediately. Gives up with a clear,
+    actionable error message instead of a raw HTTPError/ReadTimeout
+    traceback.
+
+    `timeout` (seconds) and `max_attempts` are tunable per-call so callers
+    with especially large contexts (e.g. Master Travel Plans) can allow
+    more time/attempts without changing every other caller's behavior.
     """
     import requests, time
+    from requests.exceptions import ReadTimeout, ConnectionError as ReqConnectionError
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     _p = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
@@ -2822,13 +2863,23 @@ def call_gemini(api_key: str, model: str, system: str, user: str) -> str:
         "generationConfig": {"temperature": 0.7, "maxOutputTokens": 8192}
     }
 
-    max_attempts = 4
     last_err = None
+    last_timeout = False
     for attempt in range(1, max_attempts + 1):
-        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"},
-                             params={"key": api_key}, proxies=proxies, timeout=90)
+        try:
+            resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"},
+                                 params={"key": api_key}, proxies=proxies, timeout=timeout)
+        except (ReadTimeout, ReqConnectionError) as e:
+            last_err = e
+            last_timeout = True
+            if attempt == max_attempts:
+                break
+            time.sleep(min(10, 2 ** attempt))
+            continue
+
         if resp.status_code in (429, 503):
             last_err = resp
+            last_timeout = False
             if attempt == max_attempts:
                 break
             # Prefer the server's suggested retry delay if present in the
@@ -2848,8 +2899,16 @@ def call_gemini(api_key: str, model: str, system: str, user: str) -> str:
         resp.raise_for_status()
         return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
-    # Exhausted all retries on 429/503 — raise a clear, actionable error.
-    if last_err is not None and last_err.status_code == 429:
+    # Exhausted all retries.
+    if last_timeout:
+        raise RuntimeError(
+            f"Gemini API did not respond within {timeout}s after {max_attempts} "
+            "attempts. This can happen when the request/context is very large "
+            "(e.g. too many matched travel packages) or the network/proxy is "
+            "slow. Please try narrowing your request (e.g. a specific "
+            "destination and duration) and try again."
+        )
+    if last_err is not None and getattr(last_err, "status_code", None) == 429:
         raise RuntimeError(
             "Gemini API rate limit / quota exceeded (HTTP 429) after several "
             "retries. This usually means the free-tier requests-per-minute "
@@ -2858,8 +2917,9 @@ def call_gemini(api_key: str, model: str, system: str, user: str) -> str:
             "in the sidebar, or use an API key with a higher quota."
         )
     if last_err is not None:
+        status = getattr(last_err, "status_code", "unknown")
         raise RuntimeError(
-            f"Gemini API returned HTTP {last_err.status_code} after several "
+            f"Gemini API returned HTTP {status} after several "
             "retries — the service may be temporarily overloaded. Please try again shortly."
         )
     raise RuntimeError("Gemini API call failed for an unknown reason.")
