@@ -3980,8 +3980,9 @@ if st.session_state.get("knowledge_source") == KB_SOURCE_MASTER_PLANS:
                         destination_hint=dest_hint,
                         nights_hint=hints["nights"], days_hint=hints["days"],
                     )
-                    if sources:
-                        answer += f"\n\n---\n*📦 Matched Package IDs: {', '.join(sorted(sources))}*"
+                    # NOTE: matched Package IDs are intentionally NOT appended to
+                    # the chat answer — showing that block on every reply pushed
+                    # the "Generate PDF" button out of view / below the fold.
                 except Exception as e:
                     answer = f"❌ Error: {e}"
                     meta = {}
