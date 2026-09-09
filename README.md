@@ -1,47 +1,6 @@
----
-title: KukuTrip Travel Itinerary Agent
-emoji: ✈️
-colorFrom: red
-colorTo: gray
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # ✈ Travel Itinerary Agent
 
 A local RAG (Retrieval-Augmented Generation) agent that reads your personal travel documents (Word & PDF) and creates custom itineraries with a beautifully designed PDF — powered by Google Gemini.
-
-## Deploying to Hugging Face Spaces (Docker)
-
-This repo includes a `Dockerfile` so it can be deployed as a **Docker Space**
-on Hugging Face — this avoids the Streamlit Community Cloud issue where the
-base container's Debian `bullseye-security` apt repo has expired release
-metadata and breaks `packages.txt` installation on every build.
-
-1. Create a new Space at https://huggingface.co/new-space
-   - **SDK**: choose **Docker**
-   - **Space hardware**: CPU basic is sufficient
-2. Push this repository's contents to the Space's git remote (Spaces work
-   like a normal git repo):
-   ```bash
-   git remote add space https://huggingface.co/spaces/<your-username>/<space-name>
-   git push space main
-   ```
-3. In the Space's **Settings → Repository secrets**, add:
-   - `GOOGLE_API_KEY` — your Gemini API key (read via `os.environ.get("GOOGLE_API_KEY")`
-     in `app.py`, same as the existing Streamlit secrets fallback)
-4. The Space will build the `Dockerfile` (current Debian `bookworm-slim`
-   base, not the EOL `bullseye`) and start the app automatically on port
-   `7860`.
-
-No other code changes are required — `app.py`'s writable paths
-(`CHROMA_DIR`, `HISTORY_DIR`, `HEADER_CACHE`, `TEMPLATE_DIR`) already use
-`/tmp/`, and `docs/All_Plans_of_KUKUTRIP_Master.xlsx` plus the existing
-`.docx` knowledge base files are committed to the repo so they're present
-in the Space automatically.
-
----
 
 ## Folder Structure
 
